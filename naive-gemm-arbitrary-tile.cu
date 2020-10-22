@@ -4,9 +4,9 @@
 #include<device_launch_parameters.h>
 #include "common.h"
 #define DTYPE float
-#define M 1024
-#define N 2048
-#define K 1024
+#define M 4096 
+#define N 4096
+#define K 4096
 #define MBLOCK 32
 #define NBLOCK 32
 #define Mtile 128 // This will actually be the loop step of `i` loop.
@@ -45,8 +45,6 @@ __global__ void GEMM(DTYPE * a, DTYPE * b, DTYPE * c, int m, int n, int k){
   int i = i_iter_tile_base + i_iter_thread_base;
   int j = j_iter_tile_base + j_iter_thread_base;
 
-  //printf("i:%d, j:%d\n", i, j);
-
   // Allocate a Ctile in registers of dimensions (Mchunk, Nchunk).
   // Dont know if this actually goes into the resgisters as register file cannot
   // be indexed.
@@ -63,22 +61,11 @@ __global__ void GEMM(DTYPE * a, DTYPE * b, DTYPE * c, int m, int n, int k){
     for(int j_iter = j, cj = 0; j_iter < j + Nchunk; ++j_iter, ++cj){
       for(int kk = 0; kk < k; ++kk){
 	if(i_iter < m && j_iter < n){
-	  //printf("i:%d, j:%d\n", i_iter, j_iter);
 	  Cout[ci * Nchunk + cj] += a[i_iter * k + kk] * b[kk * n + j_iter];
 	}
       }
     }
   }
-  
-  //printf("i:%d, j:%d\n", i, j);
-  
-  //for(int ii = 0; ii < Mchunk; ++ii){
-  //  for(int jj = 0; jj < Nchunk; ++jj){
-  //    printf("%f ", Cout[ii * Nchunk + jj]);
-  //    printf("HELLO");
-  //  }
-  //  printf("\n");
-  //}
   
   // Write back the result to the output matrix.
   for(int ii = 0; ii < Mchunk; ++ii){
@@ -113,7 +100,7 @@ bool compareGEMM(DTYPE * h_c, DTYPE * h_c_gpu_res, int m, int n){
 void initMatrix(DTYPE * matrix, int m, int n){
   for(int i = 0; i < m; ++i){
     for(int j = 0; j < n; ++j){
-      matrix[i * n + j] = 1.0f;//static_cast <DTYPE> (rand()) / static_cast <DTYPE> (RAND_MAX);
+      matrix[i * n + j] = static_cast <DTYPE> (rand()) / static_cast <DTYPE> (RAND_MAX);
     }
   }
 }
@@ -154,8 +141,6 @@ int main(){
   dim3 block(NBLOCK, MBLOCK, 1);
   dim3 grid((n + Ntile - 1) / Ntile, (m + Mtile - 1) / Mtile, 1);
 
-  //printf("%d, %d, %d\n", block.x, block.y, block.z);
-  //printf("%d, %d, %d\n", grid.x, grid.y, grid.z);
   GEMM<<<grid, block>>>(d_a, d_b, d_c, m , n, k);	
   
   check_cuda_error(cudaPeekAtLastError());

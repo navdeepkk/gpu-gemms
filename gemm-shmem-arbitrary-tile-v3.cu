@@ -83,8 +83,8 @@ __global__ void GEMM(DTYPE * a, DTYPE * b, DTYPE * c, int m, int n, int k){
 
   // The Global index start that this thread is responsible for computing. It
   // will caluclate (Mchunk, Nchunk) starting from these indexes.
-  int i = i_iter_tile_base + i_iter_thread_base;
-  int j = j_iter_tile_base + j_iter_thread_base;
+  // int i = i_iter_tile_base + i_iter_thread_base;
+  // int j = j_iter_tile_base + j_iter_thread_base;
 
   // Linear thread id in the thread block.
   int linear_tid = (threadIdx.z * blockDim.x * blockDim.y) + (threadIdx.y * blockDim.x) + threadIdx.x;
@@ -92,6 +92,26 @@ __global__ void GEMM(DTYPE * a, DTYPE * b, DTYPE * c, int m, int n, int k){
   int num_threads_to_copy_one_Arow = Ktile / Achunktocopy;
   // Number of threads required to copy one row of B.
   int num_threads_to_copy_one_Brow = Ntile / Bchunktocopy;
+
+  DTYPE *c_tb_tile_base = c;
+  DTYPE *a_tb_tile_base = a;
+  DTYPE *b_tb_tile_base = b;
+
+  DTYPE *c_tb_tile_offset = c_tb_tile_base + i_iter_tile_base * n + j_iter_tile_base;
+  DTYPE *a_tb_tile_offset;
+  DTYPE *b_tb_tile_offset;
+  
+  DTYPE *c_thread_tile_base = c_tb_tile_offset;
+  DTYPE *a_thread_tile_base_copy;
+  DTYPE *b_thread_tile_base_copy;
+  DTYPE *a_thread_tile_base_compute;
+  DTYPE *b_thread_tile_base_compute;
+  
+  DTYPE *c_thread_tile_offset = c_thread_tile_base + i_iter_thread_base * n + j_iter_thread_base;
+  DTYPE *a_thread_tile_offset_copy;
+  DTYPE *b_thread_tile_offset_copy;
+  DTYPE *a_thread_tile_offset_compute;
+  DTYPE *b_thread_tile_offset_compute;
 
   // Allocate a Ctile in registers of dimensions (Mchunk, Nchunk).
   // Dont know if this actually goes into the resgisters as register file cannot
@@ -106,30 +126,54 @@ __global__ void GEMM(DTYPE * a, DTYPE * b, DTYPE * c, int m, int n, int k){
   // K dimension is sequential so this is not mapped to the gpu compute
   // heirarchy. Inter tile K-loop
   for(int kk = 0; kk < k; kk += Ktile){
-    // Base address in global tile of A operand.
-    int A_tile_base_addr = i_iter_tile_base * k + kk;
-    // Base address in global tile of B operand.
-    int B_tile_base_addr = kk * n + j_iter_tile_base;
+    // Base address in global tile of A & B operand thread block tile.
+    a_tb_tile_offset = a_tb_tile_base + i_iter_tile_base * k + kk;
+    b_tb_tile_offset = b_tb_tile_base + kk * n + j_iter_tile_base;
 
+    a_thread_tile_base_copy = a_tb_tile_offset; 
+    b_thread_tile_base_copy = b_tb_tile_offset; 
+    
+    a_thread_tile_base_compute = &asmem[0]; 
+    b_thread_tile_base_compute = &bsmem[0]; 
+   
+    // Represents the row and col to copy by the corresponding thread in the thread block. It is not
+    // the global row/col to copy, it is the row/col to copy relative to the thread block tile.
     int A_row_to_copy_in_global = linear_tid / num_threads_to_copy_one_Arow;
     int A_col_to_copy_in_global = linear_tid % num_threads_to_copy_one_Arow * Achunktocopy; 
     int B_row_to_copy_in_global = linear_tid / num_threads_to_copy_one_Brow;
     int B_col_to_copy_in_global = linear_tid % num_threads_to_copy_one_Brow * Bchunktocopy; 
+    
+    a_thread_tile_offset_copy = a_thread_tile_base_copy + A_row_to_copy_in_global * k + A_col_to_copy_in_global;
+    b_thread_tile_offset_copy = b_thread_tile_base_copy + B_row_to_copy_in_global * n + B_col_to_copy_in_global; 
 
     // Copy the operands from global to shared memory. Each thread copies the
     // `chunktocopy` elements from global to sharedm memory. The thread Id's
     // inside a thread block need to be linearized. Each thread copies it's
     // contiguous chunk form global memory to the shared memroy.
-    #pragma unroll
-    for(int cpi = 0; cpi < Achunktocopy; ++cpi){
-      asmem[linear_tid * Achunktocopy + cpi] = a[A_tile_base_addr + (A_row_to_copy_in_global * k) + 
-	A_col_to_copy_in_global + cpi]; 
+    #pragma unroll 
+    for(int i = threadIdx.y; i < Mtile; i += blockDim.y * gridDim.y){
+    #pragma unroll 
+      for(int j = threadIdx.x; j < Ktile; j += blockDim.x * gridDim.y){
+        asmem[i * Ktile + j] = a_tb_tile_offset[i * k + j];
+      }
     }
-    #pragma unroll
-    for(int cpi = 0; cpi < Bchunktocopy; ++cpi){
-      bsmem[linear_tid * Bchunktocopy + cpi] = b[B_tile_base_addr + (B_row_to_copy_in_global * k) + 
-	B_col_to_copy_in_global + cpi]; 
+    
+    #pragma unroll 
+    for(int i = threadIdx.y; i < Ktile; i += blockDim.y * gridDim.y){
+    #pragma unroll 
+      for(int j = threadIdx.x; j < Ntile; j += blockDim.x * gridDim.x){
+        bsmem[i * Ntile + j] = b_tb_tile_offset[i * n + j];
+      }
     }
+    
+    //#pragma unroll
+    //for(int cpi = 0; cpi < Achunktocopy; ++cpi){
+    //  asmem[linear_tid * Achunktocopy + cpi] = a_thread_tile_offset_copy[cpi]; 
+    //}
+    //#pragma unroll
+    //for(int cpi = 0; cpi < Bchunktocopy; ++cpi){
+    //  bsmem[linear_tid * Bchunktocopy + cpi] = b_thread_tile_offset_copy[cpi]; 
+    //}
     __syncthreads();
     // Start the computation using fast memory buffers.
     // This is the amount of work done by one thread i.e., computaion of one
@@ -141,27 +185,30 @@ __global__ void GEMM(DTYPE * a, DTYPE * b, DTYPE * c, int m, int n, int k){
     // have to be indexed in the shared memory now we cannot use `i_iter`,
     // `j_iter` and `k_iter` to index them. Now `i_iter` and `j_iter` is set to
     // use the thread identifier within the thread block. `k_iter` is set to
-    // start from zero and then go upto `ktile`.
+    // start from zero and then go upto `ktile`. 
+    
     #pragma unroll
-    for(int i_iter = i_iter_thread_base, ci = 0; i_iter < i_iter_thread_base + Mchunk; ++i_iter, ++ci){
+    for(int i_iter = 0, ci = 0; i_iter < Mchunk; ++i_iter, ++ci){
       #pragma unroll
-      for(int j_iter = j_iter_thread_base, cj = 0; j_iter < j_iter_thread_base + Nchunk; ++j_iter, ++cj){
-	// Intra-tile K-loop.
-	#pragma unroll
-	for(int k_iter = 0; k_iter < Ktile; ++k_iter){
-	  //printf("i:%d, j:%d, k:%d\n", i_iter, j_iter, k_iter);
-	  if(i_iter < Mtile && j_iter < Ntile){
-	    // This statement now uses the shared memory fast buffers.
-	    Cout[ci * Nchunk + cj] += asmem[i_iter * Ktile + k_iter] * bsmem[k_iter * Ntile + j_iter];
-	  }
-	}
+      for(int j_iter = 0, cj = 0; j_iter < Nchunk; ++j_iter, ++cj){
+	a_thread_tile_offset_compute = a_thread_tile_base_compute + i_iter_thread_base * Ktile;
+	b_thread_tile_offset_compute = b_thread_tile_base_compute + j_iter_thread_base;
+        // Intra-tile K-loop.
+        #pragma unroll
+        for(int k_iter = 0; k_iter < Ktile; ++k_iter){
+          //printf("i:%d, j:%d, k:%d\n", i_iter, j_iter, k_iter);
+          if(i_iter < Mtile && j_iter < Ntile){
+            // This statement now uses the shared memory fast buffers.
+            Cout[ci * Nchunk + cj] += a_thread_tile_offset_compute[i_iter * Ktile + k_iter] * b_thread_tile_offset_compute[k_iter * Ntile + j_iter];
+          }
+        }
       }
     }
 
     // Write back the result to the output matrix.
     for(int ii = 0; ii < Mchunk; ++ii){
       for(int jj = 0; jj < Nchunk; ++jj){
-	c[(i + ii) * n + (j + jj)] = Cout[ii * Nchunk + jj];
+        c_thread_tile_offset[ii * n + jj] = Cout[ii * Nchunk + jj];
       }
     }
     __syncthreads();
@@ -253,12 +300,12 @@ int main(){
   check_cuda_error(cudaPeekAtLastError());
   check_cuda_error(cudaDeviceSynchronize());
   cudaMemcpy(h_c_gpu_res, d_c, m * n * sizeof(DTYPE), cudaMemcpyDeviceToHost);
-  //hostGEMM(h_a, h_b, h_c, m, n, k);
+  hostGEMM(h_a, h_b, h_c, m, n, k);
 
-  //if(compareGEMM(h_c, h_c_gpu_res, m, n))
-  //  cout<<"Success!\n";
-  //else
-  //  cout<<"Output does not amtch!\n";
+  if(compareGEMM(h_c, h_c_gpu_res, m, n))
+    cout<<"Success!\n";
+  else
+    cout<<"Output does not match!\n";
 
   //printMatrix(h_c, m, n);
   //cout<<"output gpu\n";

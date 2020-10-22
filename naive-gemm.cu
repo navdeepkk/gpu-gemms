@@ -4,9 +4,9 @@
 #include<device_launch_parameters.h>
 #include "common.h"
 #define DTYPE float
-#define M 1024
-#define N 2048
-#define K 1024
+#define M 20480 
+#define N 20480
+#define K 20480
 #define MBLOCK 32
 #define NBLOCK 32
 
