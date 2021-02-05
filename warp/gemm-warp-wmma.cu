@@ -69,13 +69,13 @@ typedef struct {
 __host__ void init_host_matrices(DTYPEAB *a, DTYPEAB *b, DTYPECD *c){
   for(int i = 0; i < M; i++){
     for(int j = 0; j < K; j++){
-      a[i * K + j] = (half) (rand() / RAND_MAX);//1.0f;
+      a[i * K + j] = __float2half(static_cast <float> (rand()) / static_cast <float> (RAND_MAX));
     }
   }
 
   for(int i = 0; i < K; i++){
     for (int j = 0; j < N; j++){
-      b[i * N + j] = (half) (rand() / RAND_MAX);//1.0f;
+      b[i * N + j] = __float2half(static_cast <float> (rand()) / static_cast <float> (RAND_MAX));
     }
   }
 
@@ -219,7 +219,7 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
     __syncthreads();
 
     // These loops goes over warp tiles of dimension (WarpMtile, WarpNtile) inside the thread block tile. 
-    // Useful when the number of warp tiles is more than the numver of warps available. I.e., one warp
+    // Useful when the number of warp tiles is more than the number of warps available. I.e., one warp
     // is responsible for more than one warp tile.
     for(int i_iter_warp_base = warpIdx.y * WarpMtile; i_iter_warp_base < Mtile; i_iter_warp_base += WarpMtile * numWarpsInM){
       for(int j_iter_warp_base = warpIdx.x * WarpNtile; j_iter_warp_base < Ntile; j_iter_warp_base += WarpNtile * numWarpsInN){
@@ -273,15 +273,15 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
             // Compute the warp tile in chunks of (WM, WN). Move the fragments into the registers on the go.
 	    #pragma unroll
             for(int i = 0; i < WarpMtile; i += WM){
-              wmma::load_matrix_sync(a_frag[i], a_warp_tile_offset_compute + (i * Ktile), Ktile);
+              wmma::load_matrix_sync(a_frag[i / WM], a_warp_tile_offset_compute + (i * Ktile), Ktile);
 	      #pragma unroll
               for(int j = 0; j < WarpNtile; j += WN){
                 if(i == 0){
                   // copy the bfragments only once.
-                  wmma::load_matrix_sync(b_frag[j], b_warp_tile_offset_compute + j, Ntile);
+                  wmma::load_matrix_sync(b_frag[j / WN], b_warp_tile_offset_compute + j, Ntile);
                 }
                 // call mma.sync();
-                wmma::mma_sync(c_accum[i/ WM][j / WN], a_frag[i], b_frag[j], c_accum[i / WM][j / WN]);
+                wmma::mma_sync(c_accum[i/ WM][j / WN], a_frag[i / WM], b_frag[j / WN], c_accum[i / WM][j / WN]);
               }
             }
           }
@@ -317,8 +317,8 @@ void hostGEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, int m, int n, int k){
 
 bool compareGEMM(DTYPECD * h_c, DTYPECD * h_c_gpu_res, int m, int n){
   for (int i = 0; i < N * M; i++) {
-    if(fabs(h_c_gpu_res[i] - h_c[i]) > 0.1f){
-      printf("mismatch i=%d result_hD=%f result_host=%f\n", i, h_c_gpu_res[i], h_c[i]);
+    if(fabs(h_c_gpu_res[i] - h_c[i]) > 1.0f){
+      printf("mismatch i=%d result_Device=%f result_host=%f\n", i, h_c_gpu_res[i], h_c[i]);
       return false;
     }
   }
