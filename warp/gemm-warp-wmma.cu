@@ -33,7 +33,8 @@
 
 #define DTYPECD float
 #define DTYPEAB __half
-#define ELEMS_PER_THRD 4
+#define ELEMS_PER_THRD_CD 4
+#define ELEMS_PER_THRD_AB 4
 #define M 4096 
 #define N 4096 
 #define K 4096 
@@ -184,10 +185,12 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
   
   // Copy the c matrix into the shared memory memory for scaling.
   #pragma unroll
-  for(int i = linear_tid * ELEMS_PER_THRD, e = Mtile * Ntile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD; i < e; i+= x){
+  for(int i = linear_tid * ELEMS_PER_THRD_CD, e = Mtile * Ntile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD_CD; i < e; i+= x){
+    DTYPECD * smemBase = &csmem[((i / Ntile) * Ntile) + (i % Ntile)]; 
+    DTYPECD * gmemBase = c_thread_tile_base_copy + ((i / Ntile) * Ntile) + (i % Ntile); 
     #pragma unroll 
-    for(int j = i, e = i + ELEMS_PER_THRD; j < e; ++j){
-      csmem[((j / Ntile) * Ntile) + (j % Ntile)] = c_thread_tile_base_copy[((j / Ntile) * n) + (j % Ntile)];
+    for(int j = 0, e = ELEMS_PER_THRD_CD; j < e; ++j){
+      *(smemBase + j) = *(gmemBase + j);
     }
   }
   __syncthreads();
@@ -212,18 +215,22 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
     // inside a thread block need to be linearized. Each thread copies it's
     // contiguous chunk form global memory to the shared memroy.
     #pragma unroll
-    for(int i = linear_tid * ELEMS_PER_THRD, e = Mtile * Ktile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD; i < e; i+= x){
+    for(int i = linear_tid * ELEMS_PER_THRD_AB, e = Mtile * Ktile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD_AB; i < e; i+= x){
+      DTYPEAB * smemBase = &asmem[((i / Ktile) * Ktile) + (i % Ktile)]; 
+      DTYPEAB * gmemBase = a_thread_tile_base_copy + ((i / Ktile) * Ktile) + (i % Ktile); 
       #pragma unroll
-      for(int j = i, e = i + ELEMS_PER_THRD; j < e; ++j){
-	asmem[((j / Ktile) * Ktile) + (j % Ktile)] = a_thread_tile_base_copy[((j / Ktile) * k) + (j % Ktile)];
+      for(int j = 0, e = ELEMS_PER_THRD_AB; j < e; ++j){
+	*(smemBase + j) = *(gmemBase + j);
       }
     }
 
     #pragma unroll
-    for(int i = linear_tid * ELEMS_PER_THRD, e = Ntile * Ktile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD; i < e; i+= x){
+    for(int i = linear_tid * ELEMS_PER_THRD_AB, e = Ntile * Ktile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD_AB; i < e; i+= x){
+      DTYPEAB * smemBase = &bsmem[((i / Ntile) * Ntile) + (i % Ntile)]; 
+      DTYPEAB * gmemBase = b_thread_tile_base_copy + ((i / Ntile) * Ntile) + (i % Ntile); 
       #pragma unroll
-      for(int j = i, e = i + ELEMS_PER_THRD; j < e; ++j){
-	bsmem[((j / Ktile) * Ktile) + (j % Ktile)] = b_thread_tile_base_copy[((j / Ntile) * n) + (j % Ntile)];
+      for(int j = 0, e = ELEMS_PER_THRD_AB; j < e; ++j){
+	*(smemBase + j) = *(gmemBase + j);
       }
     }
     __syncthreads();
