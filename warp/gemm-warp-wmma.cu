@@ -29,12 +29,13 @@
 #include <cuda_fp16.h>
 #include <mma.h>
 #include <assert.h>
-#include"common.h"
+#include "common.h"
 
 #define DTYPECD float
 #define DTYPEAB __half
-#define ELEMS_PER_THRD_CD 4
+#define ELEMS_PER_THRD_CD 1
 #define ELEMS_PER_THRD_AB 4
+#define PADDING_AB 8
 #define M 4096 
 #define N 4096 
 #define K 4096 
@@ -48,6 +49,7 @@
 #define WarpNtile 32
 #define WarpKtile 16 // 16 because the size supported by the wmma api is 16x16x16.
 #define WarpSize 32
+#define NUM_THREADS_PER_BLOCK (Mtile / WarpMtile) * (Ntile / WarpNtile) * WarpSize
 
 #define C_LAYOUT wmma::mem_row_major
 
@@ -116,8 +118,8 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
   }
 
   // Reserve shared memory tiles for the operands.
-  __shared__ DTYPEAB asmem[Mtile * Ktile];
-  __shared__ DTYPEAB bsmem[Ktile * Ntile];
+  __shared__ DTYPEAB asmem[Mtile * (Ktile + PADDING_AB)];
+  __shared__ DTYPEAB bsmem[Ktile * (Ntile + PADDING_AB)];
   __shared__ DTYPECD csmem[Mtile * Ntile];
 
   // Linear thread id in the thread block.
@@ -216,8 +218,8 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
     // contiguous chunk form global memory to the shared memroy.
     #pragma unroll
     for(int i = linear_tid * ELEMS_PER_THRD_AB, e = Mtile * Ktile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD_AB; i < e; i+= x){
-      DTYPEAB * smemBase = &asmem[((i / Ktile) * Ktile) + (i % Ktile)]; 
-      DTYPEAB * gmemBase = a_thread_tile_base_copy + ((i / Ktile) * Ktile) + (i % Ktile); 
+      DTYPEAB * smemBase = &asmem[((i / (Ktile + PADDING_AB)) * (Ktile + PADDING_AB)) + (i % (Ktile + PADDING_AB))]; 
+      DTYPEAB * gmemBase = a_thread_tile_base_copy + ((i / (Ktile + PADDING_AB)) * (Ktile + PADDING_AB)) + (i % (Ktile + PADDING_AB)); 
       #pragma unroll
       for(int j = 0, e = ELEMS_PER_THRD_AB; j < e; ++j){
 	*(smemBase + j) = *(gmemBase + j);
@@ -226,8 +228,8 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
 
     #pragma unroll
     for(int i = linear_tid * ELEMS_PER_THRD_AB, e = Ntile * Ktile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD_AB; i < e; i+= x){
-      DTYPEAB * smemBase = &bsmem[((i / Ntile) * Ntile) + (i % Ntile)]; 
-      DTYPEAB * gmemBase = b_thread_tile_base_copy + ((i / Ntile) * Ntile) + (i % Ntile); 
+      DTYPEAB * smemBase = &bsmem[((i / (Ntile + PADDING_AB)) * (Ntile + PADDING_AB)) + (i % (Ntile + PADDING_AB))]; 
+      DTYPEAB * gmemBase = b_thread_tile_base_copy + ((i / (Ntile + PADDING_AB)) * (Ntile + PADDING_AB)) + (i % (Ntile + PADDING_AB)); 
       #pragma unroll
       for(int j = 0, e = ELEMS_PER_THRD_AB; j < e; ++j){
 	*(smemBase + j) = *(gmemBase + j);
@@ -251,8 +253,7 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
 	if(kk == 0){
 	  for(int i = 0; i < WarpMtile; i += WM){
             for(int j = 0; j < WarpNtile; j += WN){
-              wmma::load_matrix_sync(c_accum[i / WM][j / WN], c_warp_tile_offset +
-	  					(i * Ntile) + j, Ntile, C_LAYOUT);
+              wmma::load_matrix_sync(c_accum[i / WM][j / WN], c_warp_tile_offset + (i * Ntile) + j, Ntile, C_LAYOUT);
             }
 	  }
 	}
@@ -280,22 +281,22 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
             // Warp tile offset of asmem will only be dependent on the warpIdx.y i.e.,
             // the row of the warp which is computing this particular part. This points to the
             // starting address of this warp for the `a` operand.
-            a_warp_tile_offset_compute = a_warp_tile_base + (i_iter_warp_base * Ktile) + kkk;
+            a_warp_tile_offset_compute = a_warp_tile_base + (i_iter_warp_base * (Ktile + PADDING_AB)) + kkk;
 
             // Warp tile offset of bsmem will only be dependent on the warpIdx.x i.e.,
             // the col of the warp which is computing this particular part. This points to the
             // starting address of this warp for the `b` operand.
-            b_warp_tile_offset_compute = b_warp_tile_base + (kkk * Ntile) + (j_iter_warp_base);
+            b_warp_tile_offset_compute = b_warp_tile_base + (kkk * (Ntile + PADDING_AB)) + (j_iter_warp_base);
 
             // Compute the warp tile in chunks of (WM, WN). Move the fragments into the registers on the go.
 	    #pragma unroll
             for(int i = 0; i < WarpMtile; i += WM){
-              wmma::load_matrix_sync(a_frag[i / WM], a_warp_tile_offset_compute + (i * Ktile), Ktile);
+              wmma::load_matrix_sync(a_frag[i / WM], a_warp_tile_offset_compute + (i * (Ktile + PADDING_AB)), (Ktile + PADDING_AB));
 	      #pragma unroll
               for(int j = 0; j < WarpNtile; j += WN){
                 if(i == 0){
                   // copy the bfragments only once.
-                  wmma::load_matrix_sync(b_frag[j / WN], b_warp_tile_offset_compute + j, Ntile);
+                  wmma::load_matrix_sync(b_frag[j / WN], b_warp_tile_offset_compute + j, (Ntile + PADDING_AB));
                 }
                 // call mma.sync();
                 wmma::mma_sync(c_accum[i/ WM][j / WN], a_frag[i / WM], b_frag[j / WN], c_accum[i / WM][j / WN]);
@@ -307,7 +308,6 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
     }
   }
   
-  //DTYPECD* cd = d_tb_tile_base + 1;
   // K-dimension processing of one warp is finished. We can copy the accum fragment
   // corresponding to this warp to the result array `d` in global memory.
   // TODO: currently assuming that one warp tile is only mapped to one warp, i.e.,
@@ -371,9 +371,9 @@ int main(){
   check_cuda_error(cudaMemcpy(d_b, h_b, k * n * sizeof(DTYPEAB), cudaMemcpyHostToDevice));
   check_cuda_error(cudaMemcpy(d_c, h_c, m * n * sizeof(DTYPECD), cudaMemcpyHostToDevice));
 
-  dim3 block(128, 1, 1);
+  dim3 block(NUM_THREADS_PER_BLOCK, 1, 1);
   dim3 grid((n + Ntile - 1) / Ntile, (m + Mtile - 1) / Mtile, 1);
-  unsigned shmemSize = ((Mtile * Ntile * 4) + ((Mtile * Ktile) + (Ntile * Ktile) * 2)) / 1024;
+  unsigned shmemSize = ((Mtile * Ntile * 4) + ((Mtile * (Ktile + PADDING_AB)) + ((Ntile + PADDING_AB) * Ktile) * 2)) / 1024;
   printf("using %uKb shared memory...\n", shmemSize);
   //check_cuda_error(cudaFuncSetAttribute(GEMM, cudaFuncAttributeMaxDynamicSharedMemorySize, shmemSize));
   check_cuda_error(cudaDeviceSetCacheConfig(cudaFuncCachePreferShared));
@@ -382,7 +382,7 @@ int main(){
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
   cudaEventRecord(start, NULL);
-  GEMM<<<grid, block, shmemSize>>>(d_a, d_b, d_c, d_d, m , n, k);
+  GEMM<<<grid, block>>>(d_a, d_b, d_c, d_d, m , n, k);
   cudaEventRecord(stop, NULL);
 
   cudaEventSynchronize(stop);

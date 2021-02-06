@@ -6,14 +6,11 @@ target triple = "nvptx64-nvidia-cuda"
 %struct.__half = type { i16 }
 %struct.__cuda_builtin_threadIdx_t = type { i8 }
 %struct.cudaFuncAttributes = type { i64, i64, i64, i32, i32, i32, i32, i32, i32, i32 }
-%struct.__half2 = type { %struct.__half, %struct.__half }
 %"class.nvcuda::wmma::fragment" = type { %"struct.nvcuda::wmma::__frag_base" }
 %"struct.nvcuda::wmma::__frag_base" = type { [16 x %struct.__half] }
 %"class.nvcuda::wmma::fragment.0" = type { %"struct.nvcuda::wmma::__frag_base.1" }
 %"struct.nvcuda::wmma::__frag_base.1" = type { [8 x %struct.__half] }
 %"class.nvcuda::wmma::fragment.2" = type { %"struct.nvcuda::wmma::__frag_base" }
-
-$_ZN7__half2C1Ev = comdat any
 
 $_ZN6nvcuda4wmma8fragmentINS0_8matrix_aELi16ELi16ELi16E6__halfNS0_9row_majorEEC1Ev = comdat any
 
@@ -23,15 +20,13 @@ $_ZN6__halfC1Ef = comdat any
 
 $_ZN6nvcuda4wmma8fragmentINS0_8matrix_bELi16ELi16ELi16E6__halfNS0_9col_majorEEC1Ev = comdat any
 
-$_ZN7__half2C2Ev = comdat any
+$_ZN6nvcuda4wmma8fragmentINS0_8matrix_aELi16ELi16ELi16E6__halfNS0_9row_majorEEC2Ev = comdat any
+
+$_ZN6nvcuda4wmma11__frag_baseI6__halfLi16ELi16EEC2Ev = comdat any
 
 $_ZN6__halfC1Ev = comdat any
 
 $_ZN6__halfC2Ev = comdat any
-
-$_ZN6nvcuda4wmma8fragmentINS0_8matrix_aELi16ELi16ELi16E6__halfNS0_9row_majorEEC2Ev = comdat any
-
-$_ZN6nvcuda4wmma11__frag_baseI6__halfLi16ELi16EEC2Ev = comdat any
 
 $_ZN6nvcuda4wmma8fragmentINS0_11accumulatorELi16ELi16ELi16E6__halfvEC2Ev = comdat any
 
@@ -117,63 +112,63 @@ entry:
 ; Function Attrs: convergent noinline norecurse nounwind optnone
 define dso_local void @_Z9test_wmmav() #1 {
 entry:
-  %a = alloca [16 x %struct.__half2], align 4
   %A = alloca %struct.__half*, align 8
   %B = alloca %struct.__half*, align 8
   %C = alloca %struct.__half*, align 8
+  %a_frag_2 = alloca [10 x %"class.nvcuda::wmma::fragment"], align 4
   %a_frag = alloca %"class.nvcuda::wmma::fragment", align 4
   %acc_frag = alloca %"class.nvcuda::wmma::fragment.0", align 4
   %ref.tmp = alloca %struct.__half, align 2
   %i = alloca i32, align 4
   %b_frag = alloca %"class.nvcuda::wmma::fragment.2", align 4
-  %array.begin = getelementptr inbounds [16 x %struct.__half2], [16 x %struct.__half2]* %a, i32 0, i32 0
-  %arrayctor.end = getelementptr inbounds %struct.__half2, %struct.__half2* %array.begin, i64 16
-  br label %arrayctor.loop
-
-arrayctor.loop:                                   ; preds = %arrayctor.loop, %entry
-  %arrayctor.cur = phi %struct.__half2* [ %array.begin, %entry ], [ %arrayctor.next, %arrayctor.loop ]
-  call void @_ZN7__half2C1Ev(%struct.__half2* nonnull dereferenceable(4) %arrayctor.cur) #6
-  %arrayctor.next = getelementptr inbounds %struct.__half2, %struct.__half2* %arrayctor.cur, i64 1
-  %arrayctor.done = icmp eq %struct.__half2* %arrayctor.next, %arrayctor.end
-  br i1 %arrayctor.done, label %arrayctor.cont, label %arrayctor.loop
-
-arrayctor.cont:                                   ; preds = %arrayctor.loop
-  %0 = call i32 @llvm.nvvm.read.ptx.sreg.tid.y() #7, !range !10
+  %0 = call i32 @llvm.nvvm.read.ptx.sreg.tid.y() #6, !range !10
   %mul = mul i32 %0, 1024
   %idx.ext = zext i32 %mul to i64
   %add.ptr = getelementptr inbounds %struct.__half, %struct.__half* getelementptr inbounds ([8192 x %struct.__half], [8192 x %struct.__half]* addrspacecast ([8192 x %struct.__half] addrspace(3)* @_ZZ9test_wmmavE4smem to [8192 x %struct.__half]*), i64 0, i64 0), i64 %idx.ext
-  %1 = call i32 @llvm.nvvm.read.ptx.sreg.tid.y() #7, !range !10
+  %1 = call i32 @llvm.nvvm.read.ptx.sreg.tid.y() #6, !range !10
   %mul2 = mul i32 %1, 16
   %idx.ext3 = zext i32 %mul2 to i64
   %add.ptr4 = getelementptr inbounds %struct.__half, %struct.__half* %add.ptr, i64 %idx.ext3
   store %struct.__half* %add.ptr4, %struct.__half** %A, align 8
-  %2 = call i32 @llvm.nvvm.read.ptx.sreg.tid.y() #7, !range !10
+  %2 = call i32 @llvm.nvvm.read.ptx.sreg.tid.y() #6, !range !10
   %mul6 = mul i32 %2, 1024
   %idx.ext7 = zext i32 %mul6 to i64
   %add.ptr8 = getelementptr inbounds %struct.__half, %struct.__half* getelementptr inbounds ([8192 x %struct.__half], [8192 x %struct.__half]* addrspacecast ([8192 x %struct.__half] addrspace(3)* @_ZZ9test_wmmavE4smem to [8192 x %struct.__half]*), i64 0, i64 0), i64 %idx.ext7
-  %3 = call i32 @llvm.nvvm.read.ptx.sreg.tid.y() #7, !range !10
+  %3 = call i32 @llvm.nvvm.read.ptx.sreg.tid.y() #6, !range !10
   %mul10 = mul i32 %3, 16
   %idx.ext11 = zext i32 %mul10 to i64
   %add.ptr12 = getelementptr inbounds %struct.__half, %struct.__half* %add.ptr8, i64 %idx.ext11
   %add.ptr13 = getelementptr inbounds %struct.__half, %struct.__half* %add.ptr12, i64 256
   store %struct.__half* %add.ptr13, %struct.__half** %B, align 8
-  %4 = call i32 @llvm.nvvm.read.ptx.sreg.tid.y() #7, !range !10
+  %4 = call i32 @llvm.nvvm.read.ptx.sreg.tid.y() #6, !range !10
   %mul15 = mul i32 %4, 1024
   %idx.ext16 = zext i32 %mul15 to i64
   %add.ptr17 = getelementptr inbounds %struct.__half, %struct.__half* getelementptr inbounds ([8192 x %struct.__half], [8192 x %struct.__half]* addrspacecast ([8192 x %struct.__half] addrspace(3)* @_ZZ9test_wmmavE4smem to [8192 x %struct.__half]*), i64 0, i64 0), i64 %idx.ext16
-  %5 = call i32 @llvm.nvvm.read.ptx.sreg.tid.y() #7, !range !10
+  %5 = call i32 @llvm.nvvm.read.ptx.sreg.tid.y() #6, !range !10
   %mul19 = mul i32 %5, 16
   %idx.ext20 = zext i32 %mul19 to i64
   %add.ptr21 = getelementptr inbounds %struct.__half, %struct.__half* %add.ptr17, i64 %idx.ext20
   %add.ptr22 = getelementptr inbounds %struct.__half, %struct.__half* %add.ptr21, i64 512
   store %struct.__half* %add.ptr22, %struct.__half** %C, align 8
-  call void @_ZN6nvcuda4wmma8fragmentINS0_8matrix_aELi16ELi16ELi16E6__halfNS0_9row_majorEEC1Ev(%"class.nvcuda::wmma::fragment"* nonnull dereferenceable(32) %a_frag) #6
-  call void @_ZN6nvcuda4wmma8fragmentINS0_11accumulatorELi16ELi16ELi16E6__halfvEC1Ev(%"class.nvcuda::wmma::fragment.0"* nonnull dereferenceable(16) %acc_frag) #6
+  %array.begin = getelementptr inbounds [10 x %"class.nvcuda::wmma::fragment"], [10 x %"class.nvcuda::wmma::fragment"]* %a_frag_2, i32 0, i32 0
+  %arrayctor.end = getelementptr inbounds %"class.nvcuda::wmma::fragment", %"class.nvcuda::wmma::fragment"* %array.begin, i64 10
+  br label %arrayctor.loop
+
+arrayctor.loop:                                   ; preds = %arrayctor.loop, %entry
+  %arrayctor.cur = phi %"class.nvcuda::wmma::fragment"* [ %array.begin, %entry ], [ %arrayctor.next, %arrayctor.loop ]
+  call void @_ZN6nvcuda4wmma8fragmentINS0_8matrix_aELi16ELi16ELi16E6__halfNS0_9row_majorEEC1Ev(%"class.nvcuda::wmma::fragment"* nonnull dereferenceable(32) %arrayctor.cur) #7
+  %arrayctor.next = getelementptr inbounds %"class.nvcuda::wmma::fragment", %"class.nvcuda::wmma::fragment"* %arrayctor.cur, i64 1
+  %arrayctor.done = icmp eq %"class.nvcuda::wmma::fragment"* %arrayctor.next, %arrayctor.end
+  br i1 %arrayctor.done, label %arrayctor.cont, label %arrayctor.loop
+
+arrayctor.cont:                                   ; preds = %arrayctor.loop
+  call void @_ZN6nvcuda4wmma8fragmentINS0_8matrix_aELi16ELi16ELi16E6__halfNS0_9row_majorEEC1Ev(%"class.nvcuda::wmma::fragment"* nonnull dereferenceable(32) %a_frag) #7
+  call void @_ZN6nvcuda4wmma8fragmentINS0_11accumulatorELi16ELi16ELi16E6__halfvEC1Ev(%"class.nvcuda::wmma::fragment.0"* nonnull dereferenceable(16) %acc_frag) #7
   %6 = bitcast %"class.nvcuda::wmma::fragment.0"* %acc_frag to %"struct.nvcuda::wmma::__frag_base.1"*
-  call void @_ZN6__halfC1Ef(%struct.__half* nonnull dereferenceable(2) %ref.tmp, float 0.000000e+00) #6
-  call void @_ZN6nvcuda4wmmaL13fill_fragmentI6__halfLi8ELi8EEEvRNS0_11__frag_baseIT_XT0_EXT1_EEERKNS0_13helper_traitsIS4_E18fill_argument_typeE(%"struct.nvcuda::wmma::__frag_base.1"* nonnull align 4 dereferenceable(16) %6, %struct.__half* nonnull align 2 dereferenceable(2) %ref.tmp) #6
+  call void @_ZN6__halfC1Ef(%struct.__half* nonnull dereferenceable(2) %ref.tmp, float 0.000000e+00) #7
+  call void @_ZN6nvcuda4wmmaL13fill_fragmentI6__halfLi8ELi8EEEvRNS0_11__frag_baseIT_XT0_EXT1_EEERKNS0_13helper_traitsIS4_E18fill_argument_typeE(%"struct.nvcuda::wmma::__frag_base.1"* nonnull align 4 dereferenceable(16) %6, %struct.__half* nonnull align 2 dereferenceable(2) %ref.tmp) #7
   %7 = load %struct.__half*, %struct.__half** %A, align 8
-  call void @_ZN6nvcuda4wmmaL16load_matrix_syncERNS0_8fragmentINS0_8matrix_aELi16ELi16ELi16E6__halfNS0_9row_majorEEEPKS3_j(%"class.nvcuda::wmma::fragment"* nonnull align 4 dereferenceable(32) %a_frag, %struct.__half* %7, i32 16) #6
+  call void @_ZN6nvcuda4wmmaL16load_matrix_syncERNS0_8fragmentINS0_8matrix_aELi16ELi16ELi16E6__halfNS0_9row_majorEEEPKS3_j(%"class.nvcuda::wmma::fragment"* nonnull align 4 dereferenceable(32) %a_frag, %struct.__half* %7, i32 16) #7
   store i32 0, i32* %i, align 4
   br label %for.cond
 
@@ -183,10 +178,10 @@ for.cond:                                         ; preds = %for.inc, %arrayctor
   br i1 %cmp, label %for.body, label %for.end
 
 for.body:                                         ; preds = %for.cond
-  call void @_ZN6nvcuda4wmma8fragmentINS0_8matrix_bELi16ELi16ELi16E6__halfNS0_9col_majorEEC1Ev(%"class.nvcuda::wmma::fragment.2"* nonnull dereferenceable(32) %b_frag) #6
+  call void @_ZN6nvcuda4wmma8fragmentINS0_8matrix_bELi16ELi16ELi16E6__halfNS0_9col_majorEEC1Ev(%"class.nvcuda::wmma::fragment.2"* nonnull dereferenceable(32) %b_frag) #7
   %9 = load %struct.__half*, %struct.__half** %B, align 8
-  call void @_ZN6nvcuda4wmmaL16load_matrix_syncERNS0_8fragmentINS0_8matrix_bELi16ELi16ELi16E6__halfNS0_9col_majorEEEPKS3_j(%"class.nvcuda::wmma::fragment.2"* nonnull align 4 dereferenceable(32) %b_frag, %struct.__half* %9, i32 16) #6
-  call void @_ZN6nvcuda4wmmaL8mma_syncERNS0_8fragmentINS0_11accumulatorELi16ELi16ELi16E6__halfvEERKNS1_INS0_8matrix_aELi16ELi16ELi16ES3_NS0_9row_majorEEERKNS1_INS0_8matrix_bELi16ELi16ELi16ES3_NS0_9col_majorEEERKS4_(%"class.nvcuda::wmma::fragment.0"* nonnull align 4 dereferenceable(16) %acc_frag, %"class.nvcuda::wmma::fragment"* nonnull align 4 dereferenceable(32) %a_frag, %"class.nvcuda::wmma::fragment.2"* nonnull align 4 dereferenceable(32) %b_frag, %"class.nvcuda::wmma::fragment.0"* nonnull align 4 dereferenceable(16) %acc_frag) #6
+  call void @_ZN6nvcuda4wmmaL16load_matrix_syncERNS0_8fragmentINS0_8matrix_bELi16ELi16ELi16E6__halfNS0_9col_majorEEEPKS3_j(%"class.nvcuda::wmma::fragment.2"* nonnull align 4 dereferenceable(32) %b_frag, %struct.__half* %9, i32 16) #7
+  call void @_ZN6nvcuda4wmmaL8mma_syncERNS0_8fragmentINS0_11accumulatorELi16ELi16ELi16E6__halfvEERKNS1_INS0_8matrix_aELi16ELi16ELi16ES3_NS0_9row_majorEEERKNS1_INS0_8matrix_bELi16ELi16ELi16ES3_NS0_9col_majorEEERKS4_(%"class.nvcuda::wmma::fragment.0"* nonnull align 4 dereferenceable(16) %acc_frag, %"class.nvcuda::wmma::fragment"* nonnull align 4 dereferenceable(32) %a_frag, %"class.nvcuda::wmma::fragment.2"* nonnull align 4 dereferenceable(32) %b_frag, %"class.nvcuda::wmma::fragment.0"* nonnull align 4 dereferenceable(16) %acc_frag) #7
   br label %for.inc
 
 for.inc:                                          ; preds = %for.body
@@ -197,17 +192,7 @@ for.inc:                                          ; preds = %for.body
 
 for.end:                                          ; preds = %for.cond
   %11 = load %struct.__half*, %struct.__half** %C, align 8
-  call void @_ZN6nvcuda4wmmaL17store_matrix_syncEP6__halfRKNS0_8fragmentINS0_11accumulatorELi16ELi16ELi16ES1_vEEjNS0_8layout_tE(%struct.__half* %11, %"class.nvcuda::wmma::fragment.0"* nonnull align 4 dereferenceable(16) %acc_frag, i32 16, i32 1) #6
-  ret void
-}
-
-; Function Attrs: convergent noinline nounwind optnone
-define linkonce_odr dso_local void @_ZN7__half2C1Ev(%struct.__half2* nonnull dereferenceable(4) %this) unnamed_addr #0 comdat align 2 {
-entry:
-  %this.addr = alloca %struct.__half2*, align 8
-  store %struct.__half2* %this, %struct.__half2** %this.addr, align 8
-  %this1 = load %struct.__half2*, %struct.__half2** %this.addr, align 8
-  call void @_ZN7__half2C2Ev(%struct.__half2* nonnull dereferenceable(4) %this1) #6
+  call void @_ZN6nvcuda4wmmaL17store_matrix_syncEP6__halfRKNS0_8fragmentINS0_11accumulatorELi16ELi16ELi16ES1_vEEjNS0_8layout_tE(%struct.__half* %11, %"class.nvcuda::wmma::fragment.0"* nonnull align 4 dereferenceable(16) %acc_frag, i32 16, i32 1) #7
   ret void
 }
 
@@ -217,7 +202,7 @@ entry:
   %this.addr = alloca %"class.nvcuda::wmma::fragment"*, align 8
   store %"class.nvcuda::wmma::fragment"* %this, %"class.nvcuda::wmma::fragment"** %this.addr, align 8
   %this1 = load %"class.nvcuda::wmma::fragment"*, %"class.nvcuda::wmma::fragment"** %this.addr, align 8
-  call void @_ZN6nvcuda4wmma8fragmentINS0_8matrix_aELi16ELi16ELi16E6__halfNS0_9row_majorEEC2Ev(%"class.nvcuda::wmma::fragment"* nonnull dereferenceable(32) %this1) #6
+  call void @_ZN6nvcuda4wmma8fragmentINS0_8matrix_aELi16ELi16ELi16E6__halfNS0_9row_majorEEC2Ev(%"class.nvcuda::wmma::fragment"* nonnull dereferenceable(32) %this1) #7
   ret void
 }
 
@@ -227,7 +212,7 @@ entry:
   %this.addr = alloca %"class.nvcuda::wmma::fragment.0"*, align 8
   store %"class.nvcuda::wmma::fragment.0"* %this, %"class.nvcuda::wmma::fragment.0"** %this.addr, align 8
   %this1 = load %"class.nvcuda::wmma::fragment.0"*, %"class.nvcuda::wmma::fragment.0"** %this.addr, align 8
-  call void @_ZN6nvcuda4wmma8fragmentINS0_11accumulatorELi16ELi16ELi16E6__halfvEC2Ev(%"class.nvcuda::wmma::fragment.0"* nonnull dereferenceable(16) %this1) #6
+  call void @_ZN6nvcuda4wmma8fragmentINS0_11accumulatorELi16ELi16ELi16E6__halfvEC2Ev(%"class.nvcuda::wmma::fragment.0"* nonnull dereferenceable(16) %this1) #7
   ret void
 }
 
@@ -245,7 +230,7 @@ entry:
   %1 = bitcast %struct.__half* %agg.tmp to i8*
   %2 = bitcast %struct.__half* %0 to i8*
   call void @llvm.memcpy.p0i8.p0i8.i64(i8* align 2 %1, i8* align 2 %2, i64 2, i1 false)
-  %call = call %struct.__half @_ZN6nvcuda4wmmaL19__get_storage_valueI6__halfS2_S2_EET0_T1_(%struct.__half* byval(%struct.__half) align 2 %agg.tmp) #6
+  %call = call %struct.__half @_ZN6nvcuda4wmmaL19__get_storage_valueI6__halfS2_S2_EET0_T1_(%struct.__half* byval(%struct.__half) align 2 %agg.tmp) #7
   %3 = getelementptr inbounds %struct.__half, %struct.__half* %v, i32 0, i32 0
   %4 = extractvalue %struct.__half %call, 0
   store i16 %4, i16* %3, align 2
@@ -288,7 +273,7 @@ entry:
   store float %f, float* %f.addr, align 4
   %this1 = load %struct.__half*, %struct.__half** %this.addr, align 8
   %0 = load float, float* %f.addr, align 4
-  call void @_ZN6__halfC2Ef(%struct.__half* nonnull dereferenceable(2) %this1, float %0) #6
+  call void @_ZN6__halfC2Ef(%struct.__half* nonnull dereferenceable(2) %this1, float %0) #7
   ret void
 }
 
@@ -348,7 +333,7 @@ entry:
   %this.addr = alloca %"class.nvcuda::wmma::fragment.2"*, align 8
   store %"class.nvcuda::wmma::fragment.2"* %this, %"class.nvcuda::wmma::fragment.2"** %this.addr, align 8
   %this1 = load %"class.nvcuda::wmma::fragment.2"*, %"class.nvcuda::wmma::fragment.2"** %this.addr, align 8
-  call void @_ZN6nvcuda4wmma8fragmentINS0_8matrix_bELi16ELi16ELi16E6__halfNS0_9col_majorEEC2Ev(%"class.nvcuda::wmma::fragment.2"* nonnull dereferenceable(32) %this1) #6
+  call void @_ZN6nvcuda4wmma8fragmentINS0_8matrix_bELi16ELi16ELi16E6__halfNS0_9col_majorEEC2Ev(%"class.nvcuda::wmma::fragment.2"* nonnull dereferenceable(32) %this1) #7
   ret void
 }
 
@@ -562,38 +547,6 @@ if.end:                                           ; preds = %if.else, %if.then
   ret void
 }
 
-; Function Attrs: convergent noinline nounwind optnone
-define linkonce_odr dso_local void @_ZN7__half2C2Ev(%struct.__half2* nonnull dereferenceable(4) %this) unnamed_addr #0 comdat align 2 {
-entry:
-  %this.addr = alloca %struct.__half2*, align 8
-  store %struct.__half2* %this, %struct.__half2** %this.addr, align 8
-  %this1 = load %struct.__half2*, %struct.__half2** %this.addr, align 8
-  %x = getelementptr inbounds %struct.__half2, %struct.__half2* %this1, i32 0, i32 0
-  call void @_ZN6__halfC1Ev(%struct.__half* nonnull dereferenceable(2) %x) #6
-  %y = getelementptr inbounds %struct.__half2, %struct.__half2* %this1, i32 0, i32 1
-  call void @_ZN6__halfC1Ev(%struct.__half* nonnull dereferenceable(2) %y) #6
-  ret void
-}
-
-; Function Attrs: convergent noinline nounwind optnone
-define linkonce_odr dso_local void @_ZN6__halfC1Ev(%struct.__half* nonnull dereferenceable(2) %this) unnamed_addr #0 comdat align 2 {
-entry:
-  %this.addr = alloca %struct.__half*, align 8
-  store %struct.__half* %this, %struct.__half** %this.addr, align 8
-  %this1 = load %struct.__half*, %struct.__half** %this.addr, align 8
-  call void @_ZN6__halfC2Ev(%struct.__half* nonnull dereferenceable(2) %this1) #6
-  ret void
-}
-
-; Function Attrs: convergent noinline nounwind optnone
-define linkonce_odr dso_local void @_ZN6__halfC2Ev(%struct.__half* nonnull dereferenceable(2) %this) unnamed_addr #0 comdat align 2 {
-entry:
-  %this.addr = alloca %struct.__half*, align 8
-  store %struct.__half* %this, %struct.__half** %this.addr, align 8
-  %this1 = load %struct.__half*, %struct.__half** %this.addr, align 8
-  ret void
-}
-
 ; Function Attrs: nounwind readnone
 declare i32 @llvm.nvvm.read.ptx.sreg.tid.y() #2
 
@@ -604,7 +557,7 @@ entry:
   store %"class.nvcuda::wmma::fragment"* %this, %"class.nvcuda::wmma::fragment"** %this.addr, align 8
   %this1 = load %"class.nvcuda::wmma::fragment"*, %"class.nvcuda::wmma::fragment"** %this.addr, align 8
   %0 = bitcast %"class.nvcuda::wmma::fragment"* %this1 to %"struct.nvcuda::wmma::__frag_base"*
-  call void @_ZN6nvcuda4wmma11__frag_baseI6__halfLi16ELi16EEC2Ev(%"struct.nvcuda::wmma::__frag_base"* nonnull dereferenceable(32) %0) #6
+  call void @_ZN6nvcuda4wmma11__frag_baseI6__halfLi16ELi16EEC2Ev(%"struct.nvcuda::wmma::__frag_base"* nonnull dereferenceable(32) %0) #7
   ret void
 }
 
@@ -621,12 +574,31 @@ entry:
 
 arrayctor.loop:                                   ; preds = %arrayctor.loop, %entry
   %arrayctor.cur = phi %struct.__half* [ %array.begin, %entry ], [ %arrayctor.next, %arrayctor.loop ]
-  call void @_ZN6__halfC1Ev(%struct.__half* nonnull dereferenceable(2) %arrayctor.cur) #6
+  call void @_ZN6__halfC1Ev(%struct.__half* nonnull dereferenceable(2) %arrayctor.cur) #7
   %arrayctor.next = getelementptr inbounds %struct.__half, %struct.__half* %arrayctor.cur, i64 1
   %arrayctor.done = icmp eq %struct.__half* %arrayctor.next, %arrayctor.end
   br i1 %arrayctor.done, label %arrayctor.cont, label %arrayctor.loop
 
 arrayctor.cont:                                   ; preds = %arrayctor.loop
+  ret void
+}
+
+; Function Attrs: convergent noinline nounwind optnone
+define linkonce_odr dso_local void @_ZN6__halfC1Ev(%struct.__half* nonnull dereferenceable(2) %this) unnamed_addr #0 comdat align 2 {
+entry:
+  %this.addr = alloca %struct.__half*, align 8
+  store %struct.__half* %this, %struct.__half** %this.addr, align 8
+  %this1 = load %struct.__half*, %struct.__half** %this.addr, align 8
+  call void @_ZN6__halfC2Ev(%struct.__half* nonnull dereferenceable(2) %this1) #7
+  ret void
+}
+
+; Function Attrs: convergent noinline nounwind optnone
+define linkonce_odr dso_local void @_ZN6__halfC2Ev(%struct.__half* nonnull dereferenceable(2) %this) unnamed_addr #0 comdat align 2 {
+entry:
+  %this.addr = alloca %struct.__half*, align 8
+  store %struct.__half* %this, %struct.__half** %this.addr, align 8
+  %this1 = load %struct.__half*, %struct.__half** %this.addr, align 8
   ret void
 }
 
@@ -637,7 +609,7 @@ entry:
   store %"class.nvcuda::wmma::fragment.0"* %this, %"class.nvcuda::wmma::fragment.0"** %this.addr, align 8
   %this1 = load %"class.nvcuda::wmma::fragment.0"*, %"class.nvcuda::wmma::fragment.0"** %this.addr, align 8
   %0 = bitcast %"class.nvcuda::wmma::fragment.0"* %this1 to %"struct.nvcuda::wmma::__frag_base.1"*
-  call void @_ZN6nvcuda4wmma11__frag_baseI6__halfLi8ELi8EEC2Ev(%"struct.nvcuda::wmma::__frag_base.1"* nonnull dereferenceable(16) %0) #6
+  call void @_ZN6nvcuda4wmma11__frag_baseI6__halfLi8ELi8EEC2Ev(%"struct.nvcuda::wmma::__frag_base.1"* nonnull dereferenceable(16) %0) #7
   ret void
 }
 
@@ -654,7 +626,7 @@ entry:
 
 arrayctor.loop:                                   ; preds = %arrayctor.loop, %entry
   %arrayctor.cur = phi %struct.__half* [ %array.begin, %entry ], [ %arrayctor.next, %arrayctor.loop ]
-  call void @_ZN6__halfC1Ev(%struct.__half* nonnull dereferenceable(2) %arrayctor.cur) #6
+  call void @_ZN6__halfC1Ev(%struct.__half* nonnull dereferenceable(2) %arrayctor.cur) #7
   %arrayctor.next = getelementptr inbounds %struct.__half, %struct.__half* %arrayctor.cur, i64 1
   %arrayctor.done = icmp eq %struct.__half* %arrayctor.next, %arrayctor.end
   br i1 %arrayctor.done, label %arrayctor.cont, label %arrayctor.loop
@@ -673,7 +645,7 @@ entry:
   store float %f, float* %f.addr, align 4
   %this1 = load %struct.__half*, %struct.__half** %this.addr, align 8
   %0 = load float, float* %f.addr, align 4
-  %call = call %struct.__half @_ZL12__float2halff(float %0) #6
+  %call = call %struct.__half @_ZL12__float2halff(float %0) #7
   %1 = getelementptr inbounds %struct.__half, %struct.__half* %agg.tmp, i32 0, i32 0
   %2 = extractvalue %struct.__half %call, 0
   store i16 %2, i16* %1, align 2
@@ -690,7 +662,7 @@ entry:
   %retval = alloca %struct.__half, align 2
   %a.addr = alloca float, align 4
   store float %a, float* %a.addr, align 4
-  call void @_ZN6__halfC1Ev(%struct.__half* nonnull dereferenceable(2) %retval) #6
+  call void @_ZN6__halfC1Ev(%struct.__half* nonnull dereferenceable(2) %retval) #7
   %0 = bitcast %struct.__half* %retval to i16*
   %1 = load float, float* %a.addr, align 4
   %2 = call i16 asm "{  cvt.rn.f16.f32 $0, $1;}\0A", "=h,f"(float %1) #8, !srcloc !14
@@ -709,7 +681,7 @@ entry:
   store %"class.nvcuda::wmma::fragment.2"* %this, %"class.nvcuda::wmma::fragment.2"** %this.addr, align 8
   %this1 = load %"class.nvcuda::wmma::fragment.2"*, %"class.nvcuda::wmma::fragment.2"** %this.addr, align 8
   %0 = bitcast %"class.nvcuda::wmma::fragment.2"* %this1 to %"struct.nvcuda::wmma::__frag_base"*
-  call void @_ZN6nvcuda4wmma11__frag_baseI6__halfLi16ELi16EEC2Ev(%"struct.nvcuda::wmma::__frag_base"* nonnull dereferenceable(32) %0) #6
+  call void @_ZN6nvcuda4wmma11__frag_baseI6__halfLi16ELi16EEC2Ev(%"struct.nvcuda::wmma::__frag_base"* nonnull dereferenceable(32) %0) #7
   ret void
 }
 
@@ -745,8 +717,8 @@ attributes #2 = { nounwind readnone }
 attributes #3 = { argmemonly nounwind readonly }
 attributes #4 = { argmemonly nounwind writeonly }
 attributes #5 = { argmemonly nofree nosync nounwind willreturn }
-attributes #6 = { convergent nounwind }
-attributes #7 = { nounwind }
+attributes #6 = { nounwind }
+attributes #7 = { convergent nounwind }
 attributes #8 = { convergent nounwind readnone }
 
 !llvm.module.flags = !{!0, !1, !2}
@@ -768,4 +740,4 @@ attributes #8 = { convergent nounwind readnone }
 !11 = distinct !{!11, !12}
 !12 = !{!"llvm.loop.unroll.enable"}
 !13 = distinct !{!13, !12}
-!14 = !{i32 3803771}
+!14 = !{i32 3803839}
