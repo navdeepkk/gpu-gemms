@@ -1,4 +1,4 @@
-//  nvcc -O3 -std=c++11 -use_fast_math -ccbin g++ -arch=compute_75 -code=sm_75 -expt-relaxed-constexpr
+//  nvcc -O3 -std=c++11 -use_fast_math -ccbin g++ -arch=compute_75 -code=sm_75 --maxrregcount=255
 //  Performs matrix mutliplication using shared memory tiles where ewach thread
 //  may need to calculate and move more than one data element. Assumes matrices
 //  stored in row major order. The loop structure followed is as(one level
@@ -33,16 +33,17 @@
 
 #define DTYPECD float
 #define DTYPEAB __half
-#define M 1024 
-#define N 1024 
-#define K 1024 
+#define ELEMS_PER_THRD 4
+#define M 4096 
+#define N 4096 
+#define K 4096 
 #define WM 16
 #define WN 16
 #define WK 16
-#define Mtile 64  // This will actually be the loop step of `i` loop.
-#define Ntile 64  // This will actually be the loop step of `j` loop.
-#define Ktile 32  // This will actually be the loop step of `k` loop.
-#define WarpMtile 32
+#define Mtile 64 // This will actually be the loop step of `i` loop.
+#define Ntile 64 // This will actually be the loop step of `j` loop.
+#define Ktile 16 // This will actually be the loop step of `k` loop.
+#define WarpMtile 32 
 #define WarpNtile 32
 #define WarpKtile 16 // 16 because the size supported by the wmma api is 16x16x16.
 #define WarpSize 32
@@ -183,8 +184,11 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
   
   // Copy the c matrix into the shared memory memory for scaling.
   #pragma unroll
-  for(int i = linear_tid, e = Mtile * Ntile, x = blockDim.x * blockDim.y; i < e; i+= x){
-    csmem[((i / Ntile) * Ntile) + (i % Ntile)] = c_thread_tile_base_copy[((i / Ntile) * n) + (i % Ntile)];
+  for(int i = linear_tid * ELEMS_PER_THRD, e = Mtile * Ntile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD; i < e; i+= x){
+    #pragma unroll 
+    for(int j = i, e = i + ELEMS_PER_THRD; j < e; ++j){
+      csmem[((j / Ntile) * Ntile) + (j % Ntile)] = c_thread_tile_base_copy[((j / Ntile) * n) + (j % Ntile)];
+    }
   }
   __syncthreads();
   
@@ -208,14 +212,20 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
     // inside a thread block need to be linearized. Each thread copies it's
     // contiguous chunk form global memory to the shared memroy.
     #pragma unroll
-    for(int i = linear_tid, e = Mtile * Ktile, x = blockDim.x * blockDim.y; i < e; i+= x){
-      asmem[((i / Ktile) * Ktile) + (i % Ktile)] = a_thread_tile_base_copy[((i / Ktile) * k) + (i % Ktile)];
+    for(int i = linear_tid * ELEMS_PER_THRD, e = Mtile * Ktile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD; i < e; i+= x){
+      #pragma unroll
+      for(int j = i, e = i + ELEMS_PER_THRD; j < e; ++j){
+	asmem[((j / Ktile) * Ktile) + (j % Ktile)] = a_thread_tile_base_copy[((j / Ktile) * k) + (j % Ktile)];
+      }
     }
 
     #pragma unroll
-    for(int i = linear_tid, e = Ntile * Ktile, x = blockDim.x * blockDim.y; i < e; i+= x){
-      bsmem[((i / Ktile) * Ktile) + (i % Ktile)] = b_thread_tile_base_copy[((i / Ntile) * n) + (i % Ntile)];
-    } 
+    for(int i = linear_tid * ELEMS_PER_THRD, e = Ntile * Ktile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD; i < e; i+= x){
+      #pragma unroll
+      for(int j = i, e = i + ELEMS_PER_THRD; j < e; ++j){
+	bsmem[((j / Ktile) * Ktile) + (j % Ktile)] = b_thread_tile_base_copy[((j / Ntile) * n) + (j % Ntile)];
+      }
+    }
     __syncthreads();
 
     // These loops goes over warp tiles of dimension (WarpMtile, WarpNtile) inside the thread block tile. 
@@ -356,12 +366,16 @@ int main(){
 
   dim3 block(128, 1, 1);
   dim3 grid((n + Ntile - 1) / Ntile, (m + Mtile - 1) / Mtile, 1);
+  unsigned shmemSize = ((Mtile * Ntile * 4) + ((Mtile * Ktile) + (Ntile * Ktile) * 2)) / 1024;
+  printf("using %uKb shared memory...\n", shmemSize);
+  //check_cuda_error(cudaFuncSetAttribute(GEMM, cudaFuncAttributeMaxDynamicSharedMemorySize, shmemSize));
+  check_cuda_error(cudaDeviceSetCacheConfig(cudaFuncCachePreferShared));
 
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
   cudaEventRecord(start, NULL);
-  GEMM<<<grid, block>>>(d_a, d_b, d_c, d_d, m , n, k);
+  GEMM<<<grid, block, shmemSize>>>(d_a, d_b, d_c, d_d, m , n, k);
   cudaEventRecord(stop, NULL);
 
   cudaEventSynchronize(stop);
