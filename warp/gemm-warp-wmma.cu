@@ -219,7 +219,7 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
     #pragma unroll
     for(int i = linear_tid * ELEMS_PER_THRD_AB, e = Mtile * Ktile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD_AB; i < e; i+= x){
       DTYPEAB * smemBase = &asmem[((i / (Ktile + PADDING_AB)) * (Ktile + PADDING_AB)) + (i % (Ktile + PADDING_AB))]; 
-      DTYPEAB * gmemBase = a_thread_tile_base_copy + ((i / (Ktile + PADDING_AB)) * (Ktile + PADDING_AB)) + (i % (Ktile + PADDING_AB)); 
+      DTYPEAB * gmemBase = a_thread_tile_base_copy + ((i / Ktile) * Ktile) + (i % Ktile); 
       #pragma unroll
       for(int j = 0, e = ELEMS_PER_THRD_AB; j < e; ++j){
 	*(smemBase + j) = *(gmemBase + j);
@@ -229,7 +229,7 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
     #pragma unroll
     for(int i = linear_tid * ELEMS_PER_THRD_AB, e = Ntile * Ktile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD_AB; i < e; i+= x){
       DTYPEAB * smemBase = &bsmem[((i / (Ntile + PADDING_AB)) * (Ntile + PADDING_AB)) + (i % (Ntile + PADDING_AB))]; 
-      DTYPEAB * gmemBase = b_thread_tile_base_copy + ((i / (Ntile + PADDING_AB)) * (Ntile + PADDING_AB)) + (i % (Ntile + PADDING_AB)); 
+      DTYPEAB * gmemBase = b_thread_tile_base_copy + ((i / Ntile) * Ntile) + (i % Ntile); 
       #pragma unroll
       for(int j = 0, e = ELEMS_PER_THRD_AB; j < e; ++j){
 	*(smemBase + j) = *(gmemBase + j);
@@ -240,7 +240,9 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
     // These loops goes over warp tiles of dimension (WarpMtile, WarpNtile) inside the thread block tile. 
     // Useful when the number of warp tiles is more than the number of warps available. I.e., one warp
     // is responsible for more than one warp tile.
+    #pragma unroll
     for(int i_iter_warp_base = warpIdx.y * WarpMtile; i_iter_warp_base < Mtile; i_iter_warp_base += WarpMtile * numWarpsInM){
+      #pragma unroll
       for(int j_iter_warp_base = warpIdx.x * WarpNtile; j_iter_warp_base < Ntile; j_iter_warp_base += WarpNtile * numWarpsInN){
         //printf("%d %d\n", i_iter_warp_base, j_iter_warp_base).	
         c_warp_tile_offset = c_warp_tile_base + i_iter_warp_base * Ntile + j_iter_warp_base;
@@ -375,8 +377,8 @@ int main(){
   dim3 grid((n + Ntile - 1) / Ntile, (m + Mtile - 1) / Mtile, 1);
   unsigned shmemSize = ((Mtile * Ntile * 4) + ((Mtile * (Ktile + PADDING_AB)) + ((Ntile + PADDING_AB) * Ktile) * 2)) / 1024;
   printf("using %uKb shared memory...\n", shmemSize);
-  //check_cuda_error(cudaFuncSetAttribute(GEMM, cudaFuncAttributeMaxDynamicSharedMemorySize, shmemSize));
-  check_cuda_error(cudaDeviceSetCacheConfig(cudaFuncCachePreferShared));
+  //check_cuda_error(cudaFuncSetAttribute(GEMM, cudaFuncAttributeMaxDynamicSharedMemorySize, 64 * 1024));
+  //check_cuda_error(cudaDeviceSetCacheConfig(cudaFuncCachePreferShared));
 
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
