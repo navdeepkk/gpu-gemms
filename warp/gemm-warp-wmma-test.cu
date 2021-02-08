@@ -33,11 +33,9 @@
 
 #define DTYPECD float
 #define DTYPEAB __half
-#define ELEMS_PER_THRD_CD 1
-#define ELEMS_PER_THRD_AB 4
-#define M 1024 
-#define N 1024 
-#define K 1024 
+#define M 4096 
+#define N 4096 
+#define K 4096 
 #define WM 16
 #define WN 16
 #define WK 16
@@ -75,7 +73,7 @@ __host__ void init_host_matrices(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD * a
   for(int i = 0; i < M; i++){
     for(int j = 0; j < K; j++){
       //a[i * K + j] = __float2half(1.0f/*static_cast <float> (rand()) / static_cast <float> (RAND_MAX)*/);
-      DTYPECD val = 0.0f;//(static_cast <float> (rand()) / static_cast <float> (RAND_MAX)) * 2.0f;
+      DTYPECD val = (half)(rand() % 3);//0.0f;//(static_cast <float> (rand()) / static_cast <float> (RAND_MAX)) * 2.0f;
       a[i * K + j] = __float2half(val); 
       a_f[i * K + j] = val; 
     }
@@ -84,7 +82,7 @@ __host__ void init_host_matrices(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD * a
   for(int i = 0; i < K; i++){
     for (int j = 0; j < N; j++){
       //b[i * N + j] = __float2half(1.0f/*static_cast <float> (rand()) / static_cast <float> (RAND_MAX)*/);
-      DTYPECD val = 0.0f;//(static_cast <float> (rand()) / static_cast <float> (RAND_MAX)) * 2.0f;
+      DTYPECD val = (half)(rand() % 3);//0.0f;//(static_cast <float> (rand()) / static_cast <float> (RAND_MAX)) * 2.0f;
       b[i * N + j] = __float2half(val);
       b_f[i * N + j] = val;
     }
@@ -202,19 +200,22 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
   wmma::fragment<wmma::accumulator, WM, WN, WK, DTYPECD> c_accum[WarpMtile / WM][WarpNtile / WN];
   
   // Copy the c matrix into the shared memory memory for scaling.
-  //#pragma unroll
-  //for(int i = linear_tid, e = Mtile * Ntile, x = blockDim.x * blockDim.y; i < e; i+= x){
-  //  csmem[((i / Ntile) * Ntile) + (i % Ntile)] = c_thread_tile_base_copy[((i / Ntile) * n) + (i % Ntile)];
-  //}
+  int4 * cgmemBase = (int4 *)c_thread_tile_base_copy; 
+  int4 * csmemBase = (int4 *)&csmem[0];
   #pragma unroll
-  for(int i = linear_tid * ELEMS_PER_THRD_CD, e = Mtile * Ntile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD_CD; i < e; i+= x){
-    DTYPECD * smemBase = &csmem[((i / Ntile) * Ntile) + (i % Ntile)];
-    DTYPECD * gmemBase = c_thread_tile_base_copy + ((i / Ntile) * n) + (i % Ntile);
-    #pragma unroll
-    for(int j = 0, e = ELEMS_PER_THRD_CD; j < e; ++j){
-      *(smemBase + j) = *(gmemBase + j);
-    }
+  for(int i = linear_tid, e = Mtile * (Ntile / 4), x = blockDim.x * blockDim.y; i < e; i+= x){
+    //csmem[((i / Ntile) * Ntile) + (i % Ntile)] = c_thread_tile_base_copy[((i / Ntile) * n) + (i % Ntile)];
+    *(csmemBase + ((i / (Ntile / 4)) * (Ntile / 4)) + (i % (Ntile / 4))) = *(cgmemBase + ((i / (Ntile / 4) * (N / 4)) + (i % (Ntile / 4))));
   }
+  //#pragma unroll
+  //for(int i = linear_tid * ELEMS_PER_THRD_CD, e = Mtile * Ntile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD_CD; i < e; i+= x){
+  //  DTYPECD * smemBase = &csmem[((i / Ntile) * Ntile) + (i % Ntile)];
+  //  DTYPECD * gmemBase = c_thread_tile_base_copy + ((i / Ntile) * n) + (i % Ntile);
+  //  #pragma unroll
+  //  for(int j = 0, e = ELEMS_PER_THRD_CD; j < e; ++j){
+  //    *(smemBase + j) = *(gmemBase + j);
+  //  }
+  //}
   __syncthreads();
   
   //------Write code for fractional scaling here----//
@@ -242,18 +243,18 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
    
     int acounter = 0, bcounter = 0;
     #pragma unroll
-    //for(int i = linear_tid, e = Mtile * (Ktile / 8), x = numThreads; i < e; i+= x){
-    for(int i = linear_tid, e = Mtile * Ktile, x = blockDim.x * blockDim.y; i < e; i+= x){
+    for(int i = linear_tid, e = Mtile * (Ktile / 8), x = numThreads; i < e; i+= x){
+    //for(int i = linear_tid, e = Mtile * Ktile, x = blockDim.x * blockDim.y; i < e; i+= x){
       //asmem[((i / Ktile) * Ktile) + (i % Ktile)] = a_thread_tile_base_copy[((i / Ktile) * K) + (i % Ktile)];
       //*(asmemBase + ((i / (Ktile)) * (Ktile)) + (i % (Ktile))) = *(agmemBase + ((i / (Ktile) * k) + (i % (Ktile))));
-      //*(asmemBase + ((i / (Ktile / 8)) * (Ktile / 8)) + (i % (Ktile / 8))) = *(agmemBase + ((i / (Ktile / 8) * (K / 8)) + (i % (Ktile / 8))));
+      *(asmemBase + ((i / (Ktile / 8)) * (Ktile / 8)) + (i % (Ktile / 8))) = *(agmemBase + ((i / (Ktile / 8) * (K / 8)) + (i % (Ktile / 8))));
       //*(asmemBase + ((i / (Ktile / 8)) * (Ktile / 8)) + (i % (Ktile / 8))) = *(agmemBase + ((i / (Ktile / 8) * (K / 8)) + (i % (Ktile / 8))));
       //half *hbase = (half*) (agmemBase + ((i / (Ktile / 8) * (K / 8)) + (i % (Ktile / 8))));
-      half *hbase = a_thread_tile_base_copy + ((i / Ktile) * K) + (i % Ktile);
-      for(int v = 0; v < 1; ++v){
-	*(hbase + v) = (*(hbase + v)) + __float2half(1.0f);
-	//printf("%f\n", __half2float(*(hbase + i)));
-      }
+      //half *hbase = a_thread_tile_base_copy + ((i / Ktile) * K) + (i % Ktile);
+      //for(int v = 0; v < 1; ++v){
+      //  *(hbase + v) = (*(hbase + v)) + __float2half(1.0f);
+      //  //printf("%f\n", __half2float(*(hbase + i)));
+      //}
       //++acounter;
     }
 
@@ -264,12 +265,12 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
     for(int i = linear_tid, e = Ktile * (Ntile / 8), x = numThreads; i < e; i+= x){
       //bsmem[((i / Ntile) * Ntile) + (i % Ntile)] = b_thread_tile_base_copy[((i / Ntile) * N) + (i % Ntile)];
       //*(bsmemBase + ((i / (Ntile)) * (Ntile)) + (i % (Ntile))) = *(bgmemBase + ((i / (Ntile) * n) + (i % (Ntile))));
+      *(bsmemBase + ((i / (Ntile / 8)) * (Ntile / 8)) + (i % (Ntile / 8))) = *(bgmemBase + ((i / (Ntile / 8) * (N / 8)) + (i % (Ntile / 8))));
       //*(bsmemBase + ((i / (Ntile / 8)) * (Ntile / 8)) + (i % (Ntile / 8))) = *(bgmemBase + ((i / (Ntile / 8) * (N / 8)) + (i % (Ntile / 8))));
-      //*(bsmemBase + ((i / (Ntile / 8)) * (Ntile / 8)) + (i % (Ntile / 8))) = *(bgmemBase + ((i / (Ntile / 8) * (N / 8)) + (i % (Ntile / 8))));
-      half *hbase = (half*) (bgmemBase + ((i / (Ntile / 8) * (N / 8)) + (i % (Ntile / 8))));
-      for(int v = 0; v < 1; ++v){
-	*(hbase + v) = (*(hbase + v)) + __float2half(1.0f);
-      }
+      //half *hbase = (half*) (bgmemBase + ((i / (Ntile / 8) * (N / 8)) + (i % (Ntile / 8))));
+      //for(int v = 0; v < 1; ++v){
+      //  *(hbase + v) = (*(hbase + v)) + __float2half(1.0f);
+      //}
       //++bcounter;
     } 
     //if(linear_tid == 0){
@@ -430,7 +431,7 @@ __global__ void GEMM_NAIVE(DTYPECD * a, DTYPECD * b, DTYPECD * c, int m, int n, 
 __global__ void compareGEMMOnDevice(DTYPECD * d_d, DTYPECD * d_d_naive, int m, int n){
   int counter = 0;
   for (int i = 0; i < m * n; i++) {
-    if(fabs(d_d[i] - d_d_naive[i]) > 1.0f){
+    if(fabs(d_d[i] - d_d_naive[i]) > 0.1f){
       //printf("mismatch i=%d result_opt=%f result_niave=%f\n", i, d_d[i], d_d_naive[i]);
       ++counter;
    }
@@ -444,7 +445,7 @@ __global__ void compareGEMMOnDevice(DTYPECD * d_d, DTYPECD * d_d_naive, int m, i
 void compareGEMM(DTYPECD * h_c, DTYPECD * h_c_gpu_res, int m, int n){
   int counter = 0;
   for (int i = 0; i < N * M; i++) {
-    if(fabs(h_c_gpu_res[i] - h_c[i]) > 1.0f){
+    if(fabs(h_c_gpu_res[i] - h_c[i]) > 0.1f){
       //printf("mismatch i=%d result_Device=%f result_host=%f\n", i, h_c_gpu_res[i], h_c[i]);
       counter++;
     }
@@ -506,8 +507,8 @@ int main(){
   double flopsPerMatrixMul = 2.0 * (double) m * (double) n * (double) k;
   double teraFlops = (flopsPerMatrixMul * 1.0e-12f) / (msecTotal / 1000.0f);
   cout<<"PERF: "<<teraFlops<<"Tflops \n";
-  cudaMemcpy(h_a, d_a, m * k * sizeof(DTYPEAB), cudaMemcpyDeviceToHost);
-  printMatrixHalf(h_a, m, k);
+  //cudaMemcpy(h_a, d_a, m * k * sizeof(DTYPEAB), cudaMemcpyDeviceToHost);
+  //printMatrixHalf(h_a, m, k);
 
   check_cuda_error(cudaPeekAtLastError());
   check_cuda_error(cudaDeviceSynchronize());
