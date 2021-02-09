@@ -1,4 +1,4 @@
-//  nvcc -O3 -std=c++11 -use_fast_math -ccbin g++ -arch=compute_75 -code=sm_75 --maxrregcount=255
+//  nvcc -O3 -std=c++11 -use_fast_math -ccbin g++ -arch=compute_75 -code=sm_75 -expt-relaxed-constexpr
 //  Performs matrix mutliplication using shared memory tiles where ewach thread
 //  may need to calculate and move more than one data element. Assumes matrices
 //  stored in row major order. The loop structure followed is as(one level
@@ -33,23 +33,23 @@
 
 #define DTYPECD float
 #define DTYPEAB __half
-#define ELEMS_PER_THRD_CD 1
-#define ELEMS_PER_THRD_AB 4
-#define PADDING_AB 0
-#define M 1024 
-#define N 1024 
-#define K 1024 
+#define M 4096 
+#define N 4096 
+#define K 4096 
 #define WM 16
 #define WN 16
 #define WK 16
-#define Mtile 64 // This will actually be the loop step of `i` loop.
-#define Ntile 64 // This will actually be the loop step of `j` loop.
-#define Ktile 16 // This will actually be the loop step of `k` loop.
-#define WarpMtile 32 
+#define Mtile 64  // This will actually be the loop step of `i` loop.
+#define Ntile 64  // This will actually be the loop step of `j` loop.
+#define Ktile 16  // This will actually be the loop step of `k` loop.
+#define WarpMtile 32
 #define WarpNtile 32
 #define WarpKtile 16 // 16 because the size supported by the wmma api is 16x16x16.
 #define WarpSize 32
 #define NUM_THREADS_PER_BLOCK (Mtile / WarpMtile) * (Ntile / WarpNtile) * WarpSize
+#define PADDING_AB 8
+#define MBLOCK 32
+#define NBLOCK 32
 
 #define C_LAYOUT wmma::mem_row_major
 
@@ -73,13 +73,17 @@ typedef struct {
 __host__ void init_host_matrices(DTYPEAB *a, DTYPEAB *b, DTYPECD *c){
   for(int i = 0; i < M; i++){
     for(int j = 0; j < K; j++){
-      a[i * K + j] = __float2half(1.0f/*static_cast <float> (rand()) / static_cast <float> (RAND_MAX)*/);
+      //a[i * K + j] = __float2half(static_cast <float> (rand()) / static_cast <float> (RAND_MAX) * 10);
+      a[i * K + j] = __float2half(static_cast<float>(static_cast<int>(static_cast <float> (rand()) / static_cast <float> (RAND_MAX) * 10) + 1));
+      //a[i * K + j] = __float2half(1.0f);
     }
   }
 
   for(int i = 0; i < K; i++){
     for (int j = 0; j < N; j++){
-      b[i * N + j] = __float2half(1.0f/*static_cast <float> (rand()) / static_cast <float> (RAND_MAX)*/);
+      //b[i * N + j] = __float2half(static_cast <float> (rand()) / static_cast <float> (RAND_MAX) * 10);
+      b[i * N + j] = __float2half(static_cast<float>(static_cast<int>(static_cast <float> (rand()) / static_cast <float> (RAND_MAX) * 10) + 1));
+      //b[i * N + j] = __float2half(1.0f);
     }
   }
 
@@ -88,15 +92,39 @@ __host__ void init_host_matrices(DTYPEAB *a, DTYPEAB *b, DTYPECD *c){
   }
 }
 
-template<typename T>
-__host__ void printMatrix(T * matrix, int m, int n){
+__host__ void printMatrix(DTYPEAB * matrix, int m, int n){
   for(int i = 0; i < m; ++i){
     for(int j = 0; j < n; ++j){
-      printf("%f ", (matrix[i * n + j]));
+      printf("%f ", __half2float((matrix[i * n + j])));
     }
     printf("\n");
   }
   printf("\n");
+}
+
+__host__ void printMatrixFloat(DTYPECD * matrix, int m, int n){
+  for(int i = 0; i < m; ++i){
+    for(int j = 0; j < n; ++j){
+      printf("%f ", matrix[i * n + j]);
+    }
+    printf("\n");
+  }
+  printf("\n");
+}
+
+__global__ void GEMM_NAIVE(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, int m, int n, int k){
+  int i_iter = blockIdx.y * blockDim.y + threadIdx.y;
+  int j_iter = blockIdx.x * blockDim.x + threadIdx.x;
+
+  DTYPECD temp = 0.0f;
+
+  for(int kk = 0; kk < k; ++kk){
+    if(i_iter < m && j_iter < n){
+      temp += __half2float(a[i_iter * k + kk]) * __half2float(b[kk * n + j_iter]);
+    }
+  }
+      
+  c[i_iter * n + j_iter] = temp;
 }
 
 __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, int n, int k){
@@ -118,8 +146,8 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
   }
 
   // Reserve shared memory tiles for the operands.
-  __shared__ DTYPEAB asmem[Mtile * (Ktile + PADDING_AB)];
-  __shared__ DTYPEAB bsmem[Ktile * (Ntile + PADDING_AB)];
+  __shared__ DTYPEAB asmem[Mtile * Ktile];
+  __shared__ DTYPEAB bsmem[Ktile * Ntile];
   __shared__ DTYPECD csmem[Mtile * Ntile];
 
   // Linear thread id in the thread block.
@@ -145,8 +173,8 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
   // address a thread block needs to copy form the global memory to shared
   // memory. This represents the coordinates in the data space not in the GPU
   // (processor) space.
-  int i_iter_tile_base = blockIdx.y * Mtile; // Maps to inter-tile `i`.
-  int j_iter_tile_base = blockIdx.x * Ntile; // Maps to inter-tile `j`.
+  int i_iter_tile_base = blockIdx.y * Mtile; // Maps to inter-tile `i`. Global row
+  int j_iter_tile_base = blockIdx.x * Ntile; // Maps to inter-tile `j`. Global row
 
   DTYPECD *c_tb_tile_base = c;
   DTYPECD *d_tb_tile_base = d;
@@ -182,19 +210,17 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
   // Allocate accmulator fragments for the C warp tiles. The allocation happens at a per
   // warp level. Each warp in the thread block will have this type of accumulator tile.
   // This accumulator tile is to be kept alive even accross different iterations of the
-  // outermost k-loop. The 
+  // outermost k-loop. 
   wmma::fragment<wmma::accumulator, WM, WN, WK, DTYPECD> c_accum[WarpMtile / WM][WarpNtile / WN];
   
   // Copy the c matrix into the shared memory memory for scaling.
+  int4 * cgmemBase = (int4 *)c_thread_tile_base_copy; 
+  int4 * csmemBase = (int4 *)&csmem[0];
   #pragma unroll
-  for(int i = linear_tid * ELEMS_PER_THRD_CD, e = Mtile * Ntile, x = blockDim.x * blockDim.y * ELEMS_PER_THRD_CD; i < e; i+= x){
-    DTYPECD * smemBase = &csmem[((i / Ntile) * Ntile) + (i % Ntile)]; 
-    DTYPECD * gmemBase = c_thread_tile_base_copy + ((i / Ntile) * N) + (i % Ntile); 
-    #pragma unroll 
-    for(int j = 0, e = ELEMS_PER_THRD_CD; j < e; ++j){
-      *(smemBase + j) = *(gmemBase + j);
-    }
+  for(int i = linear_tid, e = Mtile * (Ntile / 4), x = blockDim.x * blockDim.y; i < e; i+= x){
+    *(csmemBase + ((i / (Ntile / 4)) * (Ntile / 4)) + (i % (Ntile / 4))) = *(cgmemBase + ((i / (Ntile / 4) * (N / 4)) + (i % (Ntile / 4))));
   }
+  
   __syncthreads();
   
   //------Write code for fractional scaling here----//
@@ -203,7 +229,7 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
   //------------------------------------------------//
 
   // K dimension is sequential so this is not mapped to the gpu compute
-  // heirarchy. Inter tile K-loop.
+  // heirarchy. Inter tile K-loop. Thread Block K-loop.
   for(int kk = 0; kk < k; kk += Ktile){
     //printf("kk:%d\n", kk);
     // Base address in global tile of A & B operand thread block tile.
@@ -216,53 +242,26 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
     // `chunktocopy` elements from global to shared memory. The thread Id's
     // inside a thread block need to be linearized. Each thread copies it's
     // contiguous chunk form global memory to the shared memroy.
-    int acopyc = 0;
+    int4 * agmemBase = (int4 *)a_thread_tile_base_copy; 
+    int4 * asmemBase = (int4 *)&asmem[0]; 
+   
     #pragma unroll
-    for(int i = linear_tid * (ELEMS_PER_THRD_AB + PADDING_AB), ig = linear_tid * ELEMS_PER_THRD_AB, e = Mtile * (Ktile + PADDING_AB), x = blockDim.x * blockDim.y * (ELEMS_PER_THRD_AB + PADDING_AB), eg = blockDim.x * blockDim.y * ELEMS_PER_THRD_AB; i < e; i+= x, ig += eg){
-      DTYPEAB * smemBase = &asmem[((i / (Ktile + PADDING_AB)) * (Ktile + PADDING_AB)) + (i % (Ktile + PADDING_AB))]; 
-      DTYPEAB * gmemBase = a_thread_tile_base_copy + ((ig / Ktile) * K) + (ig % Ktile); 
-      #pragma unroll
-      for(int j = 0, e = ELEMS_PER_THRD_AB; j < e; ++j){
-	*(smemBase + j) = *(gmemBase + j);
-	++acopyc;
-	//printf("%f \n", __half2float(*(smemBase + j)));
-      }
+    for(int i = linear_tid, e = Mtile * (Ktile / 8), x = numThreads; i < e; i+= x){
+      *(asmemBase + ((i / (Ktile / 8)) * (Ktile / 8)) + (i % (Ktile / 8))) = *(agmemBase + ((i / (Ktile / 8) * (K / 8)) + (i % (Ktile / 8))));
     }
 
-    int bcopyc = 0;
-    for(int i = linear_tid * (ELEMS_PER_THRD_AB + PADDING_AB), ig = linear_tid * ELEMS_PER_THRD_AB, e = Ktile * (Ntile + PADDING_AB), x = blockDim.x * blockDim.y * (ELEMS_PER_THRD_AB + PADDING_AB), eg = blockDim.x * blockDim.y * ELEMS_PER_THRD_AB; i < e; i+= x, ig += eg){
-      DTYPEAB * smemBase = &bsmem[((i / (Ntile + PADDING_AB)) * (Ntile + PADDING_AB)) + (i % (Ntile + PADDING_AB))]; 
-      DTYPEAB * gmemBase = b_thread_tile_base_copy + ((ig / Ntile) * N) + (ig % Ntile); 
-      #pragma unroll
-      for(int j = 0, e = ELEMS_PER_THRD_AB; j < e; ++j){
-	*(smemBase + j) = *(gmemBase + j);
-	++bcopyc;
-	//printf("%f \n", __half2float(*(smemBase + j)));
-      }
+    int4 * bgmemBase = (int4 *)b_thread_tile_base_copy; 
+    int4 * bsmemBase = (int4 *)&bsmem[0]; 
+    #pragma unroll
+    for(int i = linear_tid, e = Ktile * (Ntile / 8), x = numThreads; i < e; i+= x){
+      *(bsmemBase + ((i / (Ntile / 8)) * (Ntile / 8)) + (i % (Ntile / 8))) = *(bgmemBase + ((i / (Ntile / 8) * (N / 8)) + (i % (Ntile / 8))));
     }
-    //#pragma unroll
-    //for(int i = linear_tid * (ELEMS_PER_THRD_AB + PADDING_AB), ig = linear_tid * ELEMS_PER_THRD_AB , e = (Ntile + PADDING_AB) * Ktile, x = blockDim.x * blockDim.y * (ELEMS_PER_THRD_AB + PADDING_AB), eg = blockDim.x * blockDim.y * ELEMS_PER_THRD_AB; i < e; i+= x, ig += eg){
-    //  DTYPEAB * smemBase = &bsmem[((i / (Ntile + PADDING_AB)) * (Ntile + PADDING_AB)) + (i % (Ntile + PADDING_AB))]; 
-    //  DTYPEAB * gmemBase = b_thread_tile_base_copy + ((ig / Ntile) * Ntile) + (ig % Ntile); 
-    //  #pragma unroll
-    //  for(int j = 0, e = ELEMS_PER_THRD_AB; j < e; ++j){
-    //    *(smemBase + j) = *(gmemBase + j);
-    //    ++bcopyc;
-    //    //printf("%f \n", __half2float(*(smemBase + j)));
-    //  }
-    //}
-    
-    //if(linear_tid ==0)
-
     __syncthreads();
-    printf("%d %d\n", acopyc, bcopyc);
 
     // These loops goes over warp tiles of dimension (WarpMtile, WarpNtile) inside the thread block tile. 
     // Useful when the number of warp tiles is more than the number of warps available. I.e., one warp
     // is responsible for more than one warp tile.
-    #pragma unroll
     for(int i_iter_warp_base = warpIdx.y * WarpMtile; i_iter_warp_base < Mtile; i_iter_warp_base += WarpMtile * numWarpsInM){
-      #pragma unroll
       for(int j_iter_warp_base = warpIdx.x * WarpNtile; j_iter_warp_base < Ntile; j_iter_warp_base += WarpNtile * numWarpsInN){
         //printf("%d %d\n", i_iter_warp_base, j_iter_warp_base).	
         c_warp_tile_offset = c_warp_tile_base + i_iter_warp_base * Ntile + j_iter_warp_base;
@@ -275,11 +274,13 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
 	if(kk == 0){
 	  for(int i = 0; i < WarpMtile; i += WM){
             for(int j = 0; j < WarpNtile; j += WN){
-              wmma::load_matrix_sync(c_accum[i / WM][j / WN], c_warp_tile_offset + (i * Ntile) + j, Ntile, C_LAYOUT);
+              wmma::load_matrix_sync(c_accum[i / WM][j / WN], c_warp_tile_offset +
+	  					(i * Ntile) + j, Ntile, C_LAYOUT);
             }
 	  }
+	  // Do not proceed untill all the entries in accumulator tile are 0.
+	  __syncthreads(); 
 	}
-        
         // Inter-warp-tile loop. Goes inside a thread block tile in steps of
         // warpKtile. Tf WarpKtile is equal to Ktile then K dimesnion is not really
         // tiled for the warp. Tiling for warp may result in reduced register pressure
@@ -290,44 +291,49 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
         // 16x16 operand tiles that are moved need to be changed. I.e., a_frag and b_frag
         // now need to be 2-d arrays and one more loop inside this loop needs to be present
         // which calculates the WarpKtile in chunks of 16 each.
+            
+	// These fragments contain the register operands for the a and b matrix. These
+        // contain only the operands for calculating one k-dimension.
+        wmma::fragment<wmma::matrix_a, WM, WN, WK, DTYPEAB, wmma::row_major> a_frag[WarpMtile / WM];
+        wmma::fragment<wmma::matrix_b, WM, WN, WK, DTYPEAB, wmma::row_major> b_frag[WarpNtile / WN];
+            
 	#pragma unroll
         for(int kkk = 0; kkk < Ktile; kkk += WarpKtile){
           if(kkk < k){
             //printf("kk:%d kkk:%d kk+Ktile:%d\n", kk, kkk, kk + Ktile);
            
-            // These fragments contain the register operands for the a and b matrix. These
-            // contain only the operands for calculating one k-dimension.
-            wmma::fragment<wmma::matrix_a, WM, WN, WK, DTYPEAB, wmma::row_major> a_frag[WarpMtile / WM];
-            wmma::fragment<wmma::matrix_b, WM, WN, WK, DTYPEAB, wmma::row_major> b_frag[WarpNtile / WN];
-            
             // Warp tile offset of asmem will only be dependent on the warpIdx.y i.e.,
             // the row of the warp which is computing this particular part. This points to the
             // starting address of this warp for the `a` operand.
-            a_warp_tile_offset_compute = a_warp_tile_base + (i_iter_warp_base * (Ktile + PADDING_AB)) + kkk;
+            a_warp_tile_offset_compute = a_warp_tile_base + (i_iter_warp_base * Ktile) + kkk;
 
             // Warp tile offset of bsmem will only be dependent on the warpIdx.x i.e.,
             // the col of the warp which is computing this particular part. This points to the
             // starting address of this warp for the `b` operand.
-            b_warp_tile_offset_compute = b_warp_tile_base + (kkk * (Ntile + PADDING_AB)) + (j_iter_warp_base);
+            b_warp_tile_offset_compute = b_warp_tile_base + (kkk * Ntile) + (j_iter_warp_base);
 
             // Compute the warp tile in chunks of (WM, WN). Move the fragments into the registers on the go.
 	    #pragma unroll
             for(int i = 0; i < WarpMtile; i += WM){
-              wmma::load_matrix_sync(a_frag[i / WM], a_warp_tile_offset_compute + (i * (Ktile + PADDING_AB)), (Ktile + PADDING_AB));
+              wmma::load_matrix_sync(a_frag[i / WM], a_warp_tile_offset_compute + (i * Ktile), Ktile);
 	      #pragma unroll
               for(int j = 0; j < WarpNtile; j += WN){
                 if(i == 0){
                   // copy the bfragments only once.
-                  wmma::load_matrix_sync(b_frag[j / WN], b_warp_tile_offset_compute + j, (Ntile + PADDING_AB));
+                  wmma::load_matrix_sync(b_frag[j / WN], b_warp_tile_offset_compute + j, Ntile);
                 }
                 // call mma.sync();
                 wmma::mma_sync(c_accum[i/ WM][j / WN], a_frag[i / WM], b_frag[j / WN], c_accum[i / WM][j / WN]);
               }
             }
+	    // Sync before moving data for next iteration into the register tiles.
+	    //__syncthreads();
           }
         }
       }
     }
+    // Sync before copying data for next thread block tile.
+    __syncthreads();
   }
   
   // K-dimension processing of one warp is finished. We can copy the accum fragment
@@ -340,97 +346,51 @@ __global__ void GEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, DTYPECD * d, int m, 
       wmma::store_matrix_sync(d_warp_tile_offset + ((i * n) + j), c_accum[i / WM][j/ WN], n, C_LAYOUT);
     }
   }
+  //__syncthreads();
 }
-
-__global__ void simple_wmma_gemm(half *a, half *b, float *c, float *d, int m_ld, int n_ld, int k_ld, float alpha, float beta)
-{
-   // Leading dimensions. Packed with no transpositions.
-   int lda = m_ld;
-   int ldb = k_ld;
-   int ldc = n_ld;
-
-   // Tile using a 2D grid
-   int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
-   int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
- 
-   // Declare the fragments
-   wmma::fragment<wmma::matrix_a, WM, WN, WK, half, wmma::row_major> a_frag;
-   wmma::fragment<wmma::matrix_b, WM, WN, WK, half, wmma::row_major> b_frag;
-   wmma::fragment<wmma::accumulator, WM, WN, WK, float> acc_frag;
-   wmma::fragment<wmma::accumulator, WM, WN, WK, float> c_frag;
-
-   wmma::fill_fragment(acc_frag, 0.0f);
-
-   // Loop over k
-   for (int i = 0; i < k_ld; i += WK) {
-      int aCol = i; 
-      int aRow = warpM * WM;
-
-      int bCol = i;
-      int bRow = warpN * WN;
-
-      // Bounds checking
-      if (aRow < m_ld && aCol < k_ld && bRow < k_ld && bCol < n_ld) {
-         // Load the inputs
-         wmma::load_matrix_sync(a_frag, a + aCol + aRow * lda, lda);
-         wmma::load_matrix_sync(b_frag, b + bCol + bRow * ldb, ldb);
- 
-         // Perform the matrix multiplication
-         wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-
-      }
-   }
-
-   // Load in the current value of c, scale it by beta, and add this our result scaled by alpha
-   int cCol = warpN * WN;
-   int cRow = warpM * WM;
-
-   if (cRow < m_ld && cCol < n_ld) {
-      wmma::load_matrix_sync(c_frag, c + cCol + cRow * ldc, ldc, wmma::mem_row_major);
-
-      for(int i=0; i < c_frag.num_elements; i++) {
-         c_frag.x[i] = alpha * acc_frag.x[i] + beta * c_frag.x[i];
-      }
-
-      // Store the output
-      wmma::store_matrix_sync(d + cCol + cRow * ldc, c_frag, ldc, wmma::mem_row_major);
-   }
-}
-
 
 void hostGEMM(DTYPEAB * a, DTYPEAB * b, DTYPECD * c, int m, int n, int k){
   for(int i = 0; i < m; ++i){
     for(int j = 0; j < n; ++j ){
-      DTYPECD temp = 0;
+      DTYPECD temp = 0.0f;
       for(int kk = 0; kk < k ; ++kk){
-	temp += (float)a[i * k + kk] * (float)b[kk * n + j];
+	temp += __half2float(a[i * k + kk]) * __half2float(b[kk * n + j]);
       }
       c[i * n + j] = temp;
     }
   }
 }
 
-bool compareGEMM(DTYPECD * h_c, DTYPECD * h_c_gpu_res, int m, int n){
-  for (int i = 0; i < m * n; i++) {
-    if(fabs(h_c_gpu_res[i] - h_c[i]) > 1.0f){
-      printf("mismatch i=%d result_Device=%f result_host=%f\n", i, h_c_gpu_res[i], h_c[i]);
-      return false;
+void compareGEMM(DTYPECD * h_c, DTYPECD * h_c_gpu_res, int m, int n){
+  int counter = 0;
+  for (int i = 0; i < N * M; i++) {
+    if(fabs(h_c_gpu_res[i] - h_c[i]) > 0.5f){
+      //printf("DEBUG_GPU: mismatch i=%d result_Device=%f result_host=%f\n", i, h_c_gpu_res[i], h_c[i]);
+      counter++;
     }
   }
-  return true;
+  if(counter != 0)
+    printf("DEBUG_CPU: Output does not match!: %d, %d\n", counter, m * n);
+  else
+    printf("DEBUG_CPU: Output matches!\n"); 
 }
-
 __global__ void compareGEMMOnDevice(DTYPECD * d_d, DTYPECD * d_d_naive, int m, int n){
+  int counter = 0;
   for (int i = 0; i < m * n; i++) {
-    if(fabs(d_d[i] - d_d_naive[i]) > 1.0f){
-      printf("mismatch i=%d result_opt=%f result_niave=%f\n", i, d_d[i], d_d_naive[i]);
-    }
+    if(fabs(d_d[i] - d_d_naive[i]) > 0.5f){
+      //printf("DEBUG_CPU: mismatch i=%d result_opt=%f result_niave=%f difference=%f\n", i, d_d[i], d_d_naive[i], fabs(d_d[i] - d_d_naive[i]));
+      ++counter;
+   }
   }
+  if(counter != 0)
+    printf("DEBUG_GPU: Output does not match!: %d, %d\n", counter, m * n);
+  else  
+    printf("DEBUG_GPU: Output matches!\n");
 }
 
 int main(){
   DTYPEAB *d_a, *d_b, *h_a, *h_b;
-  DTYPECD *d_c, *d_d, *h_c, *h_c_gpu_res, *d_d_naive;
+  DTYPECD *d_c, *d_d, *h_c, *h_c_gpu_res, *d_c_naive;
   int m ,n, k;
 
   m = M;
@@ -445,7 +405,7 @@ int main(){
   check_cuda_error(cudaMalloc(&d_b, k * n * sizeof(DTYPEAB)));
   check_cuda_error(cudaMalloc(&d_c, m * n * sizeof(DTYPECD)));
   check_cuda_error(cudaMalloc(&d_d, m * n * sizeof(DTYPECD)));
-  check_cuda_error(cudaMalloc(&d_d_naive, m * n * sizeof(DTYPECD)));
+  check_cuda_error(cudaMalloc(&d_c_naive, m * n * sizeof(DTYPECD)));
 
   assert(((unsigned long long)d_a) % 128 == 0);
   assert(((unsigned long long)d_b) % 128 == 0);
@@ -453,17 +413,12 @@ int main(){
   assert(((unsigned long long)d_d) % 128 == 0);
 
   init_host_matrices(h_a, h_b, h_c);
-
   check_cuda_error(cudaMemcpy(d_a, h_a, m * k * sizeof(DTYPEAB), cudaMemcpyHostToDevice));
   check_cuda_error(cudaMemcpy(d_b, h_b, k * n * sizeof(DTYPEAB), cudaMemcpyHostToDevice));
   check_cuda_error(cudaMemcpy(d_c, h_c, m * n * sizeof(DTYPECD), cudaMemcpyHostToDevice));
 
   dim3 block(NUM_THREADS_PER_BLOCK, 1, 1);
   dim3 grid((n + Ntile - 1) / Ntile, (m + Mtile - 1) / Mtile, 1);
-  unsigned shmemSize = ((Mtile * Ntile * 4) + ((Mtile * (Ktile + PADDING_AB)) + ((Ntile + PADDING_AB) * Ktile) * 2)) / 1024;
-  printf("using %uKb shared memory...\n", shmemSize);
-  //check_cuda_error(cudaFuncSetAttribute(GEMM, cudaFuncAttributeMaxDynamicSharedMemorySize, 64 * 1024));
-  //check_cuda_error(cudaDeviceSetCacheConfig(cudaFuncCachePreferShared));
 
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
@@ -481,38 +436,32 @@ int main(){
 
   check_cuda_error(cudaPeekAtLastError());
   check_cuda_error(cudaDeviceSynchronize());
-  //cudaMemcpy(h_c_gpu_res, d_d, m * n * sizeof(DTYPECD), cudaMemcpyDeviceToHost);
+  cudaMemcpy(h_c_gpu_res, d_d, m * n * sizeof(DTYPECD), cudaMemcpyDeviceToHost);
   
-  #ifdef GPU_DEBUG
-  dim3 gridDim;
-  dim3 blockDim;
-  blockDim.x = 128;
-  blockDim.y = 4;
+  #ifdef DEBUG_GPU 
+  dim3 block2(NBLOCK, MBLOCK, 1);
+  dim3 grid2((n + NBLOCK - 1) / NBLOCK, (m + MBLOCK - 1) / MBLOCK, 1);
 
-  gridDim.x = (m + (WM * blockDim.x / 32 - 1)) / (WM * blockDim.x / 32);
-  gridDim.y = (n + WN * blockDim.y - 1) / (WN * blockDim.y);
-
-  printf("Computing... using simple_wmma_gemm kernel\n");
-  simple_wmma_gemm<<<gridDim, blockDim>>>(d_a, d_b, d_c, d_d_naive, m, n, k, 1.0f, 0.0f);
-  compareGEMMOnDevice<<<1, 1>>>(d_d, d_d_naive, m, n);
-  //cudaMemcpy(h_c_gpu_res, d_d, m * n * sizeof(DTYPECD), cudaMemcpyDeviceToHost);
+  GEMM_NAIVE<<<grid2, block2>>>(d_a, d_b, d_c_naive, m , n, k);
+  
+  check_cuda_error(cudaPeekAtLastError());
+  check_cuda_error(cudaDeviceSynchronize());
+ 
+  compareGEMMOnDevice<<<1, 1>>>(d_d, d_c_naive, m, n);
   #endif
-
+  
   #ifdef DEBUG
   hostGEMM(h_a, h_b, h_c, m, n, k);
 
-  if(compareGEMM(h_c, h_c_gpu_res, m, n))
-    cout<<"Success!\n";
-  else
-    cout<<"Output does not match!\n";
+  compareGEMM(h_c, h_c_gpu_res, m, n);
   #endif
   
   #ifdef PRINT_HOST
-  printMatrix(h_c, m, n);
+  printMatrixFloat(h_c, m, n);
   #endif
   
   #ifdef PRINT_GPU
-  printMatrix(h_c_gpu_res, m, n);
+  printMatrixFloat(h_c_gpu_res, m, n);
   #endif
   
   free(h_a);
