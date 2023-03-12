@@ -297,24 +297,24 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
           int4 *bsmemBase = (int4 *)&bsmem[(stage / Ktile) % stages][0];
 
 #pragma unroll
-          for (int i = linear_tid, e = Mtile * (Ktile / 8), x = numThreads;
-               i < e; i += x) {
+          for (int i = 0, e = Mtile * (Ktile / 8); i < e; i += numThreads) {
             pipe.producer_acquire();
             cuda::memcpy_async(
-                (asmemBase + ((i / (Ktile / 8)) * (Ktile / 8)) +
-                 (i % (Ktile / 8))),
-                (agmemBase + ((i / (Ktile / 8) * (K / 8)) + (i % (Ktile / 8)))),
+                (asmemBase + (((i + linear_tid) / (Ktile / 8)) * (Ktile / 8)) +
+                 ((i + linear_tid) % (Ktile / 8))),
+                (agmemBase + (((i + linear_tid) / (Ktile / 8) * (K / 8)) +
+                              ((i + linear_tid) % (Ktile / 8)))),
                 shape4, pipe);
             pipe.producer_commit();
           }
 #pragma unroll
-          for (int i = linear_tid, e = Ktile * (Ntile / 8), x = numThreads;
-               i < e; i += x) {
+          for (int i = 0, e = Ktile * (Ntile / 8); i < e; i += numThreads) {
             pipe.producer_acquire();
             cuda::memcpy_async(
-                (bsmemBase + ((i / (Ntile / 8)) * (Ntile / 8)) +
-                 (i % (Ntile / 8))),
-                (bgmemBase + ((i / (Ntile / 8) * (N / 8)) + (i % (Ntile / 8)))),
+                (bsmemBase + (((i + linear_tid) / (Ntile / 8)) * (Ntile / 8)) +
+                 ((i + linear_tid) % (Ntile / 8))),
+                (bgmemBase + (((i + linear_tid) / (Ntile / 8) * (N / 8)) +
+                              ((i + linear_tid) % (Ntile / 8)))),
                 shape4, pipe);
             pipe.producer_commit();
           }
