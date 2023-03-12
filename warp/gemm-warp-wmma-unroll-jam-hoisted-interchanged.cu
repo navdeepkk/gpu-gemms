@@ -7,26 +7,29 @@
 //  tiling)
 
 #include <assert.h>
+#include <cooperative_groups.h>
+#include <cooperative_groups/memcpy_async.h>
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
-#include <cooperative_groups.h>
 #include <mma.h>
+
+#include <cuda/pipeline>
 
 #include "common.h"
 
 #define DTYPECD float
 #define DTYPEAB __half
-#define M 1024 
-#define N 768
-#define K 3072
+#define M 1024
+#define N 3072
+#define K 768
 #define WM 16
 #define WN 16
 #define WK 16
 #define Mtile 128  // This will actually be the loop step of `i` loop.
-#define Ntile 64  // This will actually be the loop step of `j` loop.
-#define Ktile 32  // This will actually be the loop step of `k` loop.
+#define Ntile 64   // This will actually be the loop step of `j` loop.
+#define Ktile 32   // This will actually be the loop step of `k` loop.
 #define WarpMtile 64
 #define WarpNtile 32
 #define WarpKtile \
@@ -231,7 +234,6 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
     }
   }
   auto group = cooperative_groups::this_thread_block();
-  group.sync();
 
 // These loops goes over warp tiles of dimension (WarpMtile, WarpNtile) inside
 // the thread block tile. Useful when the number of warp tiles is more than
@@ -281,23 +283,35 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
         // it's contiguous chunk form global memory to the shared memroy.
         int4 *agmemBase = (int4 *)a_thread_tile_base_copy;
         int4 *asmemBase = (int4 *)&asmem[0];
-
-        group.sync();
-#pragma unroll
-        for (int i = linear_tid, e = Mtile * (Ktile / 8), x = numThreads; i < e;
-             i += x) {
-          *(asmemBase + ((i / (Ktile / 8)) * (Ktile / 8)) + (i % (Ktile / 8))) =
-              *(agmemBase + ((i / (Ktile / 8) * (K / 8)) + (i % (Ktile / 8))));
-        }
-
         int4 *bgmemBase = (int4 *)b_thread_tile_base_copy;
         int4 *bsmemBase = (int4 *)&bsmem[0];
-#pragma unroll
+
+        cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
+        const auto shape4 = cuda::aligned_size_t<alignof(int4)>(sizeof(int4));
+
+        group.sync();
+        for (int i = linear_tid, e = Mtile * (Ktile / 8), x = numThreads; i < e;
+             i += x) {
+          pipe.producer_acquire();
+          cuda::memcpy_async(
+              (asmemBase + ((i / (Ktile / 8)) * (Ktile / 8)) +
+               (i % (Ktile / 8))),
+              (agmemBase + ((i / (Ktile / 8) * (K / 8)) + (i % (Ktile / 8)))),
+              shape4, pipe);
+          pipe.producer_commit();
+        }
         for (int i = linear_tid, e = Ktile * (Ntile / 8), x = numThreads; i < e;
              i += x) {
-          *(bsmemBase + ((i / (Ntile / 8)) * (Ntile / 8)) + (i % (Ntile / 8))) =
-              *(bgmemBase + ((i / (Ntile / 8) * (N / 8)) + (i % (Ntile / 8))));
+          pipe.producer_acquire();
+          cuda::memcpy_async(
+              (bsmemBase + ((i / (Ntile / 8)) * (Ntile / 8)) +
+               (i % (Ntile / 8))),
+              (bgmemBase + ((i / (Ntile / 8) * (N / 8)) + (i % (Ntile / 8)))),
+              shape4, pipe);
+          pipe.producer_commit();
         }
+        // Now wait for all the above issued loads to complete.
+        cuda::pipeline_consumer_wait_prior<0>(pipe);
         group.sync();
 
 #pragma unroll
