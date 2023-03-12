@@ -7,7 +7,6 @@
 //  tiling)
 
 #include <assert.h>
-#include <cooperative_groups.h>
 #include <cooperative_groups/memcpy_async.h>
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -147,8 +146,9 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   }
 
   // Reserve shared memory tiles for the operands.
-  __shared__ DTYPEAB asmem[Mtile * Ktile];
-  __shared__ DTYPEAB bsmem[Ktile * Ntile];
+  constexpr unsigned stages = 2;
+  __shared__ DTYPEAB asmem[stages][Mtile * Ktile];
+  __shared__ DTYPEAB bsmem[stages][Ktile * Ntile];
 
   // Linear thread id in the thread block.
   int linear_tid = (threadIdx.z * blockDim.x * blockDim.y) +
@@ -201,8 +201,6 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   DTYPEAB *b_warp_tile_offset_compute;
 
   // warp_tile_base for compute is equal to the base address in shared memory.
-  a_warp_tile_base = &asmem[0];
-  b_warp_tile_base = &bsmem[0];
   c_warp_tile_base = c_tb_tile_offset;
   d_warp_tile_base = d_tb_tile_offset;
 
@@ -233,7 +231,6 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
       }
     }
   }
-  auto group = cooperative_groups::this_thread_block();
 
 // These loops goes over warp tiles of dimension (WarpMtile, WarpNtile) inside
 // the thread block tile. Useful when the number of warp tiles is more than
@@ -269,50 +266,62 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
           b_frag;
 
       // K dimension is sequential so this is not mapped to the gpu compute
-      // heirarchy. Inter tile K-loop. Thread Block K-loop.
-      for (int kk = 0; kk < k; kk += Ktile) {
-        // Base address in global tile of A & B operand thread block tile.
-        a_tb_tile_offset = a_tb_tile_base + i_iter_tile_base * k + kk;
-        b_tb_tile_offset = b_tb_tile_base + kk * n + j_iter_tile_base;
-
-        a_thread_tile_base_copy = a_tb_tile_offset;
-        b_thread_tile_base_copy = b_tb_tile_offset;
-        // Copy the operands from global to shared memory. Each thread copies
-        // the `chunktocopy` elements from global to shared memory. The thread
-        // Id's inside a thread block need to be linearized. Each thread copies
-        // it's contiguous chunk form global memory to the shared memroy.
-        int4 *agmemBase = (int4 *)a_thread_tile_base_copy;
-        int4 *asmemBase = (int4 *)&asmem[0];
-        int4 *bgmemBase = (int4 *)b_thread_tile_base_copy;
-        int4 *bsmemBase = (int4 *)&bsmem[0];
-
+      // hierarchy. Inter tile K-loop. Thread Block K-loop.
+#pragma unroll
+      for (int kk = 0, stage = 0; kk < k; kk += Ktile) {
         cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
         const auto shape4 = cuda::aligned_size_t<alignof(int4)>(sizeof(int4));
 
-        group.sync();
-        for (int i = linear_tid, e = Mtile * (Ktile / 8), x = numThreads; i < e;
-             i += x) {
-          pipe.producer_acquire();
-          cuda::memcpy_async(
-              (asmemBase + ((i / (Ktile / 8)) * (Ktile / 8)) +
-               (i % (Ktile / 8))),
-              (agmemBase + ((i / (Ktile / 8) * (K / 8)) + (i % (Ktile / 8)))),
-              shape4, pipe);
-          pipe.producer_commit();
-        }
-        for (int i = linear_tid, e = Ktile * (Ntile / 8), x = numThreads; i < e;
-             i += x) {
-          pipe.producer_acquire();
-          cuda::memcpy_async(
-              (bsmemBase + ((i / (Ntile / 8)) * (Ntile / 8)) +
-               (i % (Ntile / 8))),
-              (bgmemBase + ((i / (Ntile / 8) * (N / 8)) + (i % (Ntile / 8)))),
-              shape4, pipe);
-          pipe.producer_commit();
+        // warp_tile_base for compute is equal to the base address in shared
+        // memory.
+        a_warp_tile_base = &asmem[(kk / Ktile) % stages][0];
+        b_warp_tile_base = &bsmem[(kk / Ktile) % stages][0];
+
+        // Fetch ahead for two stages.
+#pragma unroll
+        for (; stage < kk + (stages * Ktile) && stage < k; stage += Ktile) {
+          // Base address in global tile of A & B operand thread block tile.
+          a_tb_tile_offset = a_tb_tile_base + i_iter_tile_base * k + stage;
+          b_tb_tile_offset = b_tb_tile_base + stage * n + j_iter_tile_base;
+
+          a_thread_tile_base_copy = a_tb_tile_offset;
+          b_thread_tile_base_copy = b_tb_tile_offset;
+          // Copy the operands from global to shared memory. Each thread copies
+          // the `chunktocopy` elements from global to shared memory. The thread
+          // Id's inside a thread block need to be linearized. Each thread
+          // copies it's contiguous chunk form global memory to the shared
+          // memory.
+          int4 *agmemBase = (int4 *)a_thread_tile_base_copy;
+          int4 *asmemBase = (int4 *)&asmem[(stage / Ktile) % stages][0];
+          int4 *bgmemBase = (int4 *)b_thread_tile_base_copy;
+          int4 *bsmemBase = (int4 *)&bsmem[(stage / Ktile) % stages][0];
+
+#pragma unroll
+          for (int i = linear_tid, e = Mtile * (Ktile / 8), x = numThreads;
+               i < e; i += x) {
+            pipe.producer_acquire();
+            cuda::memcpy_async(
+                (asmemBase + ((i / (Ktile / 8)) * (Ktile / 8)) +
+                 (i % (Ktile / 8))),
+                (agmemBase + ((i / (Ktile / 8) * (K / 8)) + (i % (Ktile / 8)))),
+                shape4, pipe);
+            pipe.producer_commit();
+          }
+#pragma unroll
+          for (int i = linear_tid, e = Ktile * (Ntile / 8), x = numThreads;
+               i < e; i += x) {
+            pipe.producer_acquire();
+            cuda::memcpy_async(
+                (bsmemBase + ((i / (Ntile / 8)) * (Ntile / 8)) +
+                 (i % (Ntile / 8))),
+                (bgmemBase + ((i / (Ntile / 8) * (N / 8)) + (i % (Ntile / 8)))),
+                shape4, pipe);
+            pipe.producer_commit();
+          }
         }
         // Now wait for all the above issued loads to complete.
         cuda::pipeline_consumer_wait_prior<0>(pipe);
-        group.sync();
+        __syncthreads();
 
 #pragma unroll
         for (int kkk = 0; kkk < Ktile; kkk += WarpKtile) {
@@ -352,6 +361,8 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
             }
           }
         }
+        pipe.consumer_release();
+        __syncthreads();
       }
     }
   }
