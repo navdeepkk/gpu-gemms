@@ -27,10 +27,10 @@
 #define WN 16
 #define WK 16
 #define Mtile 128  // This will actually be the loop step of `i` loop.
-#define Ntile 64   // This will actually be the loop step of `j` loop.
+#define Ntile 128   // This will actually be the loop step of `j` loop.
 #define Ktile 32   // This will actually be the loop step of `k` loop.
 #define WarpMtile 64
-#define WarpNtile 32
+#define WarpNtile 64
 #define WarpKtile \
   16  // 16 because the size supported by the wmma api is 16x16x16.
 #define WarpSize 32
@@ -147,8 +147,8 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
 
   // Reserve shared memory tiles for the operands.
   constexpr unsigned stages = 2;
-  __shared__ DTYPEAB asmem[stages][Mtile * Ktile];
-  __shared__ DTYPEAB bsmem[stages][Ktile * Ntile];
+  __shared__ DTYPEAB asmem[stages][Mtile * (Ktile + PADDING_AB)];
+  __shared__ DTYPEAB bsmem[stages][Ktile * (Ntile + PADDING_AB)];
 
   // Linear thread id in the thread block.
   int linear_tid = (threadIdx.z * blockDim.x * blockDim.y) +
@@ -300,7 +300,9 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
           for (int i = 0, e = Mtile * (Ktile / 8); i < e; i += numThreads) {
             pipe.producer_acquire();
             cuda::memcpy_async(
-                (asmemBase + (((i + linear_tid) / (Ktile / 8)) * (Ktile / 8)) +
+                (asmemBase +
+                 (((i + linear_tid) / (Ktile / 8)) *
+                  ((Ktile + PADDING_AB) / 8)) +
                  ((i + linear_tid) % (Ktile / 8))),
                 (agmemBase + (((i + linear_tid) / (Ktile / 8) * (K / 8)) +
                               ((i + linear_tid) % (Ktile / 8)))),
@@ -311,7 +313,9 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
           for (int i = 0, e = Ktile * (Ntile / 8); i < e; i += numThreads) {
             pipe.producer_acquire();
             cuda::memcpy_async(
-                (bsmemBase + (((i + linear_tid) / (Ntile / 8)) * (Ntile / 8)) +
+                (bsmemBase +
+                 (((i + linear_tid) / (Ntile / 8)) *
+                  ((Ntile + PADDING_AB) / 8)) +
                  ((i + linear_tid) % (Ntile / 8))),
                 (bgmemBase + (((i + linear_tid) / (Ntile / 8) * (N / 8)) +
                               ((i + linear_tid) % (Ntile / 8)))),
@@ -331,28 +335,31 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
             // part. This points to the starting address of this warp for the
             // `a` operand.
             a_warp_tile_offset_compute =
-                a_warp_tile_base + (i_iter_warp_base * Ktile) + kkk;
+                a_warp_tile_base + (i_iter_warp_base * (Ktile + PADDING_AB)) +
+                kkk;
 
             // Warp tile offset of bsmem will only be dependent on the warpIdx.x
             // i.e., the col of the warp which is computing this particular
             // part. This points to the starting address of this warp for the
             // `b` operand.
-            b_warp_tile_offset_compute =
-                b_warp_tile_base + (kkk * Ntile) + (j_iter_warp_base);
+            b_warp_tile_offset_compute = b_warp_tile_base +
+                                         (kkk * (Ntile + PADDING_AB)) +
+                                         (j_iter_warp_base);
 
             // This micro-kernel below re-uses the value of the a registers. The
             // compiler should have done this optimization but was not able so
             // we had to do this manually.
 #pragma unroll
             for (int i = 0; i < WarpMtile; i += WM) {
-              wmma::load_matrix_sync(a_frag[i / WM],
-                                     a_warp_tile_offset_compute + (i * Ktile),
-                                     Ktile);
+              wmma::load_matrix_sync(
+                  a_frag[i / WM],
+                  a_warp_tile_offset_compute + (i * (Ktile + PADDING_AB)),
+                  (Ktile + PADDING_AB));
             }
 #pragma unroll
             for (int j = 0; j < WarpNtile; j += WN) {
               wmma::load_matrix_sync(b_frag, b_warp_tile_offset_compute + j,
-                                     Ntile);
+                                     (Ntile + PADDING_AB));
 #pragma unroll
               for (int i = 0; i < WarpMtile; i += WM) {
                 wmma::mma_sync(c_accum[i / WM][j / WN], a_frag[i / WM], b_frag,
