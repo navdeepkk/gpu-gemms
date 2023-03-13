@@ -132,7 +132,7 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   // Struct holding the geometrical coordinates of the warp.
   WarpIdx warpIdx;
 
-  int numThreads = blockDim.x * blockDim.y * blockDim.z;
+  int numThreads = NUM_THREADS_PER_BLOCK;
   int numWarpsInM = 1, numWarpsInN = 1, numWarps = numThreads / WarpSize;
 
   // Number of warps in the `M` and `N` dimension, of the thread block. If there
@@ -237,6 +237,52 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
   const auto shape4 = cuda::aligned_size_t<alignof(int4)>(sizeof(int4));
 
+  // Fetch the pipelined stages AOT.
+#pragma unroll
+  for (int stage = 0; stage < ((STAGES - 1) * Ktile); stage += Ktile) {
+    // Base address in global tile of A & B operand thread block tile.
+    a_tb_tile_offset = a_tb_tile_base + i_iter_tile_base * k + stage;
+    b_tb_tile_offset = b_tb_tile_base + stage * n + j_iter_tile_base;
+
+    a_thread_tile_base_copy = a_tb_tile_offset;
+    b_thread_tile_base_copy = b_tb_tile_offset;
+    // Copy the operands from global to shared memory. Each thread copies
+    // the `chunktocopy` elements from global to shared memory. The thread
+    // Id's inside a thread block need to be linearized. Each thread
+    // copies it's contiguous chunk form global memory to the shared
+    // memory.
+    int4 *agmemBase = (int4 *)a_thread_tile_base_copy;
+    int4 *asmemBase = (int4 *)&asmem[((stage / Ktile) % STAGES) *
+                                     (Mtile * (Ktile + PADDING_AB))];
+    int4 *bgmemBase = (int4 *)b_thread_tile_base_copy;
+    int4 *bsmemBase = (int4 *)&bsmem[((stage / Ktile) % STAGES) *
+                                     (Ktile * (Ntile + PADDING_AB))];
+
+    pipe.producer_acquire();
+#pragma unroll
+    for (int i = 0, e = Mtile * (Ktile / 8); i < e; i += numThreads) {
+      cuda::memcpy_async(
+          (asmemBase +
+           (((i + linear_tid) / (Ktile / 8)) * ((Ktile + PADDING_AB) / 8)) +
+           ((i + linear_tid) % (Ktile / 8))),
+          (agmemBase + (((i + linear_tid) / (Ktile / 8) * (K / 8)) +
+                        ((i + linear_tid) % (Ktile / 8)))),
+          shape4, pipe);
+    }
+#pragma unroll
+    for (int i = 0, e = Ktile * (Ntile / 8); i < e; i += numThreads) {
+      cuda::memcpy_async(
+          (bsmemBase +
+           (((i + linear_tid) / (Ntile / 8)) * ((Ntile + PADDING_AB) / 8)) +
+           ((i + linear_tid) % (Ntile / 8))),
+          (bgmemBase + (((i + linear_tid) / (Ntile / 8) * (N / 8)) +
+                        ((i + linear_tid) % (Ntile / 8)))),
+          shape4, pipe);
+    }
+    pipe.producer_commit();
+  }
+  __syncthreads();
+
 // These loops goes over warp tiles of dimension (WarpMtile, WarpNtile) inside
 // the thread block tile. Useful when the number of warp tiles is more than
 // the number of warps available. I.e., one warp is responsible for more than
@@ -273,15 +319,13 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
       // K dimension is sequential so this is not mapped to the gpu compute
       // hierarchy. Inter tile K-loop. Thread Block K-loop.
 #pragma unroll
-      for (int kk = 0, stage = 0; kk < k; kk += Ktile) {
-        // warp_tile_base for compute is equal to the base address in shared
-        // memory.
-        a_warp_tile_base = &asmem[((kk / Ktile) % STAGES) * (Mtile * (Ktile + PADDING_AB))];
-        b_warp_tile_base = &bsmem[((kk / Ktile) % STAGES) * (Ktile * (Ntile + PADDING_AB))];
-
-        // Fetch ahead for two stages.
+      for (int kk = (STAGES - 1) * Ktile, stage = (STAGES - 1) * Ktile; kk < k;
+           kk += Ktile) {
+        // Fetch ahead for `STAGES - 1` stages.
 #pragma unroll
-        for (; stage < kk + (STAGES * Ktile) && stage < k; stage += Ktile) {
+        for (; stage < kk + (STAGES == 1 ? 1 : ((STAGES - 1)) * Ktile) &&
+               stage < k;
+             stage += Ktile) {
           // Base address in global tile of A & B operand thread block tile.
           a_tb_tile_offset = a_tb_tile_base + i_iter_tile_base * k + stage;
           b_tb_tile_offset = b_tb_tile_base + stage * n + j_iter_tile_base;
@@ -300,7 +344,8 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
           int4 *bsmemBase = (int4 *)&bsmem[((stage / Ktile) % STAGES) *
                                            (Ktile * (Ntile + PADDING_AB))];
 
-          // Acquire a new stage in the pipeline for every iteration of this loop.
+          // Acquire a new stage in the pipeline for every iteration of this
+          // loop.
           pipe.producer_acquire();
 #pragma unroll
           for (int i = 0, e = Mtile * (Ktile / 8); i < e; i += numThreads) {
@@ -326,9 +371,20 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
           }
           pipe.producer_commit();
         }
-        // Now wait for all the above issued loads to complete.
-        cuda::pipeline_consumer_wait_prior<0>(pipe);
+        // Wait for operations committed in all stages but the last `STAGES`
+        // - 1. There will be `2 * (STAGES - 1)` items in the pipeline at a
+        // time. We only need to wait for the `STAGES - 1` .
+        cuda::pipeline_consumer_wait_prior<STAGES - 1>(pipe);
         __syncthreads();
+
+        // warp_tile_base for compute is equal to the base address in shared
+        // memory.
+        a_warp_tile_base =
+            &asmem[(((kk - ((STAGES - 1) * Ktile)) / Ktile) % STAGES) *
+                   (Mtile * (Ktile + PADDING_AB))];
+        b_warp_tile_base =
+            &bsmem[(((kk - ((STAGES - 1) * Ktile)) / Ktile) % STAGES) *
+                   (Ktile * (Ntile + PADDING_AB))];
 
 #pragma unroll
         for (int kkk = 0; kkk < Ktile; kkk += WarpKtile) {
@@ -373,6 +429,64 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
         }
         pipe.consumer_release();
         __syncthreads();
+      }
+
+      // Wait for all data copy stages to complete.
+      cuda::pipeline_consumer_wait_prior<0>(pipe);
+      __syncthreads();
+
+      // Remaining iterations for the k-loop.
+#pragma unroll
+      for (int kk = k - ((STAGES - 1) * Ktile); kk < k; kk += Ktile) {
+        // warp_tile_base for compute is equal to the base address in shared
+        // memory.
+        a_warp_tile_base =
+            &asmem[((kk / Ktile) % STAGES) * (Mtile * (Ktile + PADDING_AB))];
+        b_warp_tile_base =
+            &bsmem[((kk / Ktile) % STAGES) * (Ktile * (Ntile + PADDING_AB))];
+
+#pragma unroll
+        for (int kkk = 0; kkk < Ktile; kkk += WarpKtile) {
+          if (kkk < k) {
+            // Warp tile offset of asmem will only be dependent on the warpIdx.y
+            // i.e., the row of the warp which is computing this particular
+            // part. This points to the starting address of this warp for the
+            // `a` operand.
+            a_warp_tile_offset_compute =
+                a_warp_tile_base + (i_iter_warp_base * (Ktile + PADDING_AB)) +
+                kkk;
+
+            // Warp tile offset of bsmem will only be dependent on the warpIdx.x
+            // i.e., the col of the warp which is computing this particular
+            // part. This points to the starting address of this warp for the
+            // `b` operand.
+            b_warp_tile_offset_compute = b_warp_tile_base +
+                                         (kkk * (Ntile + PADDING_AB)) +
+                                         (j_iter_warp_base);
+
+            // This micro-kernel below re-uses the value of the a registers. The
+            // compiler should have done this optimization but was not able so
+            // we had to do this manually.
+#pragma unroll
+            for (int i = 0; i < WarpMtile; i += WM) {
+              wmma::load_matrix_sync(
+                  a_frag[i / WM],
+                  a_warp_tile_offset_compute + (i * (Ktile + PADDING_AB)),
+                  (Ktile + PADDING_AB));
+            }
+#pragma unroll
+            for (int j = 0; j < WarpNtile; j += WN) {
+              wmma::load_matrix_sync(b_frag, b_warp_tile_offset_compute + j,
+                                     (Ntile + PADDING_AB));
+#pragma unroll
+              for (int i = 0; i < WarpMtile; i += WM) {
+                wmma::mma_sync(c_accum[i / WM][j / WN], a_frag[i / WM], b_frag,
+                               c_accum[i / WM][j / WN]);
+              }
+            }
+          }
+        }
+        pipe.consumer_release();
       }
     }
   }
@@ -469,7 +583,7 @@ int main() {
 
   dim3 block(NUM_THREADS_PER_BLOCK, 1, 1);
   dim3 grid((n + Ntile - 1) / Ntile, (m + Mtile - 1) / Mtile, 1);
-  
+
   // Prefer shared memory config.
   check_cuda_error(cudaFuncSetCacheConfig(GEMM, cudaFuncCachePreferShared));
 
