@@ -477,14 +477,18 @@ int main() {
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
   cudaEventRecord(start, NULL);
-  GEMM<<<grid, block,
-         (((Mtile * (Ktile + PADDING_AB)) + (Ktile * (Ntile + PADDING_AB))) *
-          STAGES * sizeof(DTYPEAB))>>>(d_a, d_b, d_c, d_d, m, n, k);
+  int num_iters = 50;
+  for (int i = 0; i < num_iters; ++i) {
+    GEMM<<<grid, block,
+           (((Mtile * (Ktile + PADDING_AB)) + (Ktile * (Ntile + PADDING_AB))) *
+            STAGES * sizeof(DTYPEAB))>>>(d_a, d_b, d_c, d_d, m, n, k);
+  }
   cudaEventRecord(stop, NULL);
 
   cudaEventSynchronize(stop);
   float msecTotal = 0.0f;
   cudaEventElapsedTime(&msecTotal, start, stop);
+  msecTotal = msecTotal / num_iters;
   double flopsPerMatrixMul = 2.0 * (double)m * (double)n * (double)k;
   double teraFlops = (flopsPerMatrixMul * 1.0e-12f) / (msecTotal / 1000.0f);
   cout << "Time: " << msecTotal << " ms\n";
