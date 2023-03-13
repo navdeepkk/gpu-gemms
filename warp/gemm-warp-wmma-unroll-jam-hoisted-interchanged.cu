@@ -39,6 +39,7 @@
 #define PADDING_AB 8
 #define MBLOCK 32
 #define NBLOCK 32
+#define STAGES 2
 
 #define C_LAYOUT wmma::mem_row_major
 
@@ -146,9 +147,9 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   }
 
   // Reserve shared memory tiles for the operands.
-  constexpr unsigned stages = 2;
-  __shared__ DTYPEAB asmem[stages][Mtile * (Ktile + PADDING_AB)];
-  __shared__ DTYPEAB bsmem[stages][Ktile * (Ntile + PADDING_AB)];
+  extern __shared__ DTYPEAB s[];
+  DTYPEAB *asmem = s;
+  DTYPEAB *bsmem = &asmem[STAGES * Mtile * (Ktile + PADDING_AB)];
 
   // Linear thread id in the thread block.
   int linear_tid = (threadIdx.z * blockDim.x * blockDim.y) +
@@ -274,12 +275,12 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
 
         // warp_tile_base for compute is equal to the base address in shared
         // memory.
-        a_warp_tile_base = &asmem[(kk / Ktile) % stages][0];
-        b_warp_tile_base = &bsmem[(kk / Ktile) % stages][0];
+        a_warp_tile_base = &asmem[((kk / Ktile) % STAGES) * (Mtile * (Ktile + PADDING_AB))];
+        b_warp_tile_base = &bsmem[((kk / Ktile) % STAGES) * (Ktile * (Ntile + PADDING_AB))];
 
         // Fetch ahead for two stages.
 #pragma unroll
-        for (; stage < kk + (stages * Ktile) && stage < k; stage += Ktile) {
+        for (; stage < kk + (STAGES * Ktile) && stage < k; stage += Ktile) {
           // Base address in global tile of A & B operand thread block tile.
           a_tb_tile_offset = a_tb_tile_base + i_iter_tile_base * k + stage;
           b_tb_tile_offset = b_tb_tile_base + stage * n + j_iter_tile_base;
@@ -292,9 +293,11 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
           // copies it's contiguous chunk form global memory to the shared
           // memory.
           int4 *agmemBase = (int4 *)a_thread_tile_base_copy;
-          int4 *asmemBase = (int4 *)&asmem[(stage / Ktile) % stages][0];
+          int4 *asmemBase = (int4 *)&asmem[((stage / Ktile) % STAGES) *
+                                           (Mtile * (Ktile + PADDING_AB))];
           int4 *bgmemBase = (int4 *)b_thread_tile_base_copy;
-          int4 *bsmemBase = (int4 *)&bsmem[(stage / Ktile) % stages][0];
+          int4 *bsmemBase = (int4 *)&bsmem[((stage / Ktile) % STAGES) *
+                                           (Ktile * (Ntile + PADDING_AB))];
 
 #pragma unroll
           for (int i = 0, e = Mtile * (Ktile / 8); i < e; i += numThreads) {
@@ -466,12 +469,17 @@ int main() {
 
   dim3 block(NUM_THREADS_PER_BLOCK, 1, 1);
   dim3 grid((n + Ntile - 1) / Ntile, (m + Mtile - 1) / Mtile, 1);
+  
+  // Prefer shared memory config.
+  check_cuda_error(cudaFuncSetCacheConfig(GEMM, cudaFuncCachePreferShared));
 
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
   cudaEventRecord(start, NULL);
-  GEMM<<<grid, block>>>(d_a, d_b, d_c, d_d, m, n, k);
+  GEMM<<<grid, block,
+         (((Mtile * (Ktile + PADDING_AB)) + (Ktile * (Ntile + PADDING_AB))) *
+          STAGES * sizeof(DTYPEAB))>>>(d_a, d_b, d_c, d_d, m, n, k);
   cudaEventRecord(stop, NULL);
 
   cudaEventSynchronize(stop);
