@@ -233,6 +233,10 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
     }
   }
 
+  // Create the pipeline object and a vector type.
+  cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
+  const auto shape4 = cuda::aligned_size_t<alignof(int4)>(sizeof(int4));
+
 // These loops goes over warp tiles of dimension (WarpMtile, WarpNtile) inside
 // the thread block tile. Useful when the number of warp tiles is more than
 // the number of warps available. I.e., one warp is responsible for more than
@@ -270,9 +274,6 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
       // hierarchy. Inter tile K-loop. Thread Block K-loop.
 #pragma unroll
       for (int kk = 0, stage = 0; kk < k; kk += Ktile) {
-        cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
-        const auto shape4 = cuda::aligned_size_t<alignof(int4)>(sizeof(int4));
-
         // warp_tile_base for compute is equal to the base address in shared
         // memory.
         a_warp_tile_base = &asmem[((kk / Ktile) % STAGES) * (Mtile * (Ktile + PADDING_AB))];
@@ -299,9 +300,10 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
           int4 *bsmemBase = (int4 *)&bsmem[((stage / Ktile) % STAGES) *
                                            (Ktile * (Ntile + PADDING_AB))];
 
+          // Acquire a new stage in the pipeline for every iteration of this loop.
+          pipe.producer_acquire();
 #pragma unroll
           for (int i = 0, e = Mtile * (Ktile / 8); i < e; i += numThreads) {
-            pipe.producer_acquire();
             cuda::memcpy_async(
                 (asmemBase +
                  (((i + linear_tid) / (Ktile / 8)) *
@@ -310,11 +312,9 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
                 (agmemBase + (((i + linear_tid) / (Ktile / 8) * (K / 8)) +
                               ((i + linear_tid) % (Ktile / 8)))),
                 shape4, pipe);
-            pipe.producer_commit();
           }
 #pragma unroll
           for (int i = 0, e = Ktile * (Ntile / 8); i < e; i += numThreads) {
-            pipe.producer_acquire();
             cuda::memcpy_async(
                 (bsmemBase +
                  (((i + linear_tid) / (Ntile / 8)) *
@@ -323,8 +323,8 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
                 (bgmemBase + (((i + linear_tid) / (Ntile / 8) * (N / 8)) +
                               ((i + linear_tid) % (Ntile / 8)))),
                 shape4, pipe);
-            pipe.producer_commit();
           }
+          pipe.producer_commit();
         }
         // Now wait for all the above issued loads to complete.
         cuda::pipeline_consumer_wait_prior<0>(pipe);
