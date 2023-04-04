@@ -27,18 +27,18 @@
 #define WN 16
 #define WK 16
 #define Mtile 128  // This will actually be the loop step of `i` loop.
-#define Ntile 128  // This will actually be the loop step of `j` loop.
+#define Ntile 64   // This will actually be the loop step of `j` loop.
 #define Ktile 32   // This will actually be the loop step of `k` loop.
 #define WarpMtile 64
-#define WarpNtile 64
+#define WarpNtile 32
 #define WarpKtile \
   16  // 16 because the size supported by the wmma api is 16x16x16.
 #define WarpSize 32
 #define NUM_THREADS_PER_BLOCK \
   (Mtile / WarpMtile) * (Ntile / WarpNtile) * WarpSize
 #define PADDING_AB 8
-#define MBLOCK 32
-#define NBLOCK 32
+#define MBLOCK 16
+#define NBLOCK 16
 #define STAGES 1
 
 #define C_LAYOUT wmma::mem_row_major
@@ -435,7 +435,7 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
               }
             }
           }
-          pipe.consumer_release();
+          // pipe.consumer_release();
           __syncthreads();
         }
       }
