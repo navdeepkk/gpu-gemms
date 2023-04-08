@@ -26,8 +26,8 @@
 #define WM 16
 #define WN 16
 #define WK 16
-#define Mtile 128  // This will actually be the loop step of `i` loop.
-#define Ntile 128   // This will actually be the loop step of `j` loop.
+#define Mtile 128 // This will actually be the loop step of `i` loop.
+#define Ntile 128 // This will actually be the loop step of `j` loop.
 #define Ktile 32   // This will actually be the loop step of `k` loop.
 #define WarpMtile 64
 #define WarpNtile 64
@@ -36,10 +36,11 @@
 #define WarpSize 32
 #define NUM_THREADS_PER_BLOCK \
   (Mtile / WarpMtile) * (Ntile / WarpNtile) * WarpSize
-#define PADDING_AB 8
+#define PADDING_A 8
+#define PADDING_B 8
 #define MBLOCK 32
 #define NBLOCK 32
-#define STAGES 2
+#define STAGES 3
 
 #define C_LAYOUT wmma::mem_row_major
 
@@ -149,7 +150,8 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   // Reserve shared memory tiles for the operands.
   extern __shared__ DTYPEAB s[];
   DTYPEAB *asmem = s;
-  DTYPEAB *bsmem = &asmem[STAGES * Mtile * (Ktile + PADDING_AB)];
+  DTYPEAB *bsmem = &asmem[(STAGES == 1 ? 1 : ((STAGES - 1) * 2)) * Mtile *
+                          (Ktile + PADDING_A)];
 
   // Linear thread id in the thread block.
   int linear_tid = (threadIdx.z * blockDim.x * blockDim.y) +
@@ -165,7 +167,7 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   // Find the iteration of the original loop nest that maps to this thread
   // block here.
   // It is more elegant to map the iterations instead of row or col. At the end
-  // it doesn't matter becuase the iterations actually determine which row or
+  // it doesn't matter because the iterations actually determine which row or
   // col is it.
   // The Outer loops iteration beginning that this thread block tile
   // is responsible for. These coordinates also marks the beginning of the
@@ -252,18 +254,20 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
     // copies it's contiguous chunk form global memory to the shared
     // memory.
     int4 *agmemBase = (int4 *)a_thread_tile_base_copy;
-    int4 *asmemBase = (int4 *)&asmem[((stage / Ktile) % STAGES) *
-                                     (Mtile * (Ktile + PADDING_AB))];
+    int4 *asmemBase = (int4 *)&asmem[((stage / Ktile) %
+                                      (STAGES == 1 ? 1 : ((STAGES - 1) * 2))) *
+                                     (Mtile * (Ktile + PADDING_A))];
     int4 *bgmemBase = (int4 *)b_thread_tile_base_copy;
-    int4 *bsmemBase = (int4 *)&bsmem[((stage / Ktile) % STAGES) *
-                                     (Ktile * (Ntile + PADDING_AB))];
+    int4 *bsmemBase = (int4 *)&bsmem[((stage / Ktile) %
+                                      (STAGES == 1 ? 1 : ((STAGES - 1) * 2))) *
+                                     (Ktile * (Ntile + PADDING_B))];
 
     pipe.producer_acquire();
 #pragma unroll
     for (int i = 0, e = Mtile * (Ktile / 8); i < e; i += numThreads) {
       cuda::memcpy_async(
           (asmemBase +
-           (((i + linear_tid) / (Ktile / 8)) * ((Ktile + PADDING_AB) / 8)) +
+           (((i + linear_tid) / (Ktile / 8)) * ((Ktile + PADDING_A) / 8)) +
            ((i + linear_tid) % (Ktile / 8))),
           (agmemBase + (((i + linear_tid) / (Ktile / 8) * (K / 8)) +
                         ((i + linear_tid) % (Ktile / 8)))),
@@ -273,7 +277,7 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
     for (int i = 0, e = Ktile * (Ntile / 8); i < e; i += numThreads) {
       cuda::memcpy_async(
           (bsmemBase +
-           (((i + linear_tid) / (Ntile / 8)) * ((Ntile + PADDING_AB) / 8)) +
+           (((i + linear_tid) / (Ntile / 8)) * ((Ntile + PADDING_B) / 8)) +
            ((i + linear_tid) % (Ntile / 8))),
           (bgmemBase + (((i + linear_tid) / (Ntile / 8) * (N / 8)) +
                         ((i + linear_tid) % (Ntile / 8)))),
@@ -281,7 +285,6 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
     }
     pipe.producer_commit();
   }
-  __syncthreads();
 
 // These loops goes over warp tiles of dimension (WarpMtile, WarpNtile) inside
 // the thread block tile. Useful when the number of warp tiles is more than
@@ -338,11 +341,15 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
           // copies it's contiguous chunk form global memory to the shared
           // memory.
           int4 *agmemBase = (int4 *)a_thread_tile_base_copy;
-          int4 *asmemBase = (int4 *)&asmem[((stage / Ktile) % STAGES) *
-                                           (Mtile * (Ktile + PADDING_AB))];
+          int4 *asmemBase =
+              (int4 *)&asmem[((stage / Ktile) %
+                              (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+                             (Mtile * (Ktile + PADDING_A))];
           int4 *bgmemBase = (int4 *)b_thread_tile_base_copy;
-          int4 *bsmemBase = (int4 *)&bsmem[((stage / Ktile) % STAGES) *
-                                           (Ktile * (Ntile + PADDING_AB))];
+          int4 *bsmemBase =
+              (int4 *)&bsmem[((stage / Ktile) %
+                              (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+                             (Ktile * (Ntile + PADDING_B))];
 
           // Acquire a new stage in the pipeline for every iteration of this
           // loop.
@@ -352,7 +359,7 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
             cuda::memcpy_async(
                 (asmemBase +
                  (((i + linear_tid) / (Ktile / 8)) *
-                  ((Ktile + PADDING_AB) / 8)) +
+                  ((Ktile + PADDING_A) / 8)) +
                  ((i + linear_tid) % (Ktile / 8))),
                 (agmemBase + (((i + linear_tid) / (Ktile / 8) * (K / 8)) +
                               ((i + linear_tid) % (Ktile / 8)))),
@@ -363,7 +370,7 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
             cuda::memcpy_async(
                 (bsmemBase +
                  (((i + linear_tid) / (Ntile / 8)) *
-                  ((Ntile + PADDING_AB) / 8)) +
+                  ((Ntile + PADDING_B) / 8)) +
                  ((i + linear_tid) % (Ntile / 8))),
                 (bgmemBase + (((i + linear_tid) / (Ntile / 8) * (N / 8)) +
                               ((i + linear_tid) % (Ntile / 8)))),
@@ -379,12 +386,12 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
 
         // warp_tile_base for compute is equal to the base address in shared
         // memory.
-        a_warp_tile_base =
-            &asmem[(((kk - ((STAGES - 1) * Ktile)) / Ktile) % STAGES) *
-                   (Mtile * (Ktile + PADDING_AB))];
-        b_warp_tile_base =
-            &bsmem[(((kk - ((STAGES - 1) * Ktile)) / Ktile) % STAGES) *
-                   (Ktile * (Ntile + PADDING_AB))];
+        a_warp_tile_base = &asmem[(((kk - ((STAGES - 1) * Ktile)) / Ktile) %
+                                   (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+                                  (Mtile * (Ktile + PADDING_A))];
+        b_warp_tile_base = &bsmem[(((kk - ((STAGES - 1) * Ktile)) / Ktile) %
+                                   (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+                                  (Ktile * (Ntile + PADDING_B))];
 
 #pragma unroll
         for (int kkk = 0; kkk < Ktile; kkk += WarpKtile) {
@@ -394,7 +401,7 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
             // part. This points to the starting address of this warp for the
             // `a` operand.
             a_warp_tile_offset_compute =
-                a_warp_tile_base + (i_iter_warp_base * (Ktile + PADDING_AB)) +
+                a_warp_tile_base + (i_iter_warp_base * (Ktile + PADDING_A)) +
                 kkk;
 
             // Warp tile offset of bsmem will only be dependent on the warpIdx.x
@@ -402,7 +409,7 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
             // part. This points to the starting address of this warp for the
             // `b` operand.
             b_warp_tile_offset_compute = b_warp_tile_base +
-                                         (kkk * (Ntile + PADDING_AB)) +
+                                         (kkk * (Ntile + PADDING_B)) +
                                          (j_iter_warp_base);
 
             // This micro-kernel below re-uses the value of the a registers. The
@@ -412,13 +419,13 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
             for (int i = 0; i < WarpMtile; i += WM) {
               wmma::load_matrix_sync(
                   a_frag[i / WM],
-                  a_warp_tile_offset_compute + (i * (Ktile + PADDING_AB)),
-                  (Ktile + PADDING_AB));
+                  a_warp_tile_offset_compute + (i * (Ktile + PADDING_A)),
+                  (Ktile + PADDING_A));
             }
 #pragma unroll
             for (int j = 0; j < WarpNtile; j += WN) {
               wmma::load_matrix_sync(b_frag, b_warp_tile_offset_compute + j,
-                                     (Ntile + PADDING_AB));
+                                     (Ntile + PADDING_B));
 #pragma unroll
               for (int i = 0; i < WarpMtile; i += WM) {
                 wmma::mma_sync(c_accum[i / WM][j / WN], a_frag[i / WM], b_frag,
@@ -441,9 +448,11 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
         // warp_tile_base for compute is equal to the base address in shared
         // memory.
         a_warp_tile_base =
-            &asmem[((kk / Ktile) % STAGES) * (Mtile * (Ktile + PADDING_AB))];
+            &asmem[((kk / Ktile) % (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+                   (Mtile * (Ktile + PADDING_A))];
         b_warp_tile_base =
-            &bsmem[((kk / Ktile) % STAGES) * (Ktile * (Ntile + PADDING_AB))];
+            &bsmem[((kk / Ktile) % (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+                   (Ktile * (Ntile + PADDING_B))];
 
 #pragma unroll
         for (int kkk = 0; kkk < Ktile; kkk += WarpKtile) {
@@ -453,7 +462,7 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
             // part. This points to the starting address of this warp for the
             // `a` operand.
             a_warp_tile_offset_compute =
-                a_warp_tile_base + (i_iter_warp_base * (Ktile + PADDING_AB)) +
+                a_warp_tile_base + (i_iter_warp_base * (Ktile + PADDING_A)) +
                 kkk;
 
             // Warp tile offset of bsmem will only be dependent on the warpIdx.x
@@ -461,7 +470,7 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
             // part. This points to the starting address of this warp for the
             // `b` operand.
             b_warp_tile_offset_compute = b_warp_tile_base +
-                                         (kkk * (Ntile + PADDING_AB)) +
+                                         (kkk * (Ntile + PADDING_B)) +
                                          (j_iter_warp_base);
 
             // This micro-kernel below re-uses the value of the a registers. The
@@ -471,13 +480,13 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
             for (int i = 0; i < WarpMtile; i += WM) {
               wmma::load_matrix_sync(
                   a_frag[i / WM],
-                  a_warp_tile_offset_compute + (i * (Ktile + PADDING_AB)),
-                  (Ktile + PADDING_AB));
+                  a_warp_tile_offset_compute + (i * (Ktile + PADDING_A)),
+                  (Ktile + PADDING_A));
             }
 #pragma unroll
             for (int j = 0; j < WarpNtile; j += WN) {
               wmma::load_matrix_sync(b_frag, b_warp_tile_offset_compute + j,
-                                     (Ntile + PADDING_AB));
+                                     (Ntile + PADDING_B));
 #pragma unroll
               for (int i = 0; i < WarpMtile; i += WM) {
                 wmma::mma_sync(c_accum[i / WM][j / WN], a_frag[i / WM], b_frag,
@@ -586,16 +595,22 @@ int main() {
 
   // Prefer shared memory config.
   check_cuda_error(cudaFuncSetCacheConfig(GEMM, cudaFuncCachePreferShared));
+  check_cuda_error(cudaFuncSetAttribute(
+      GEMM, cudaFuncAttributeMaxDynamicSharedMemorySize,
+      (((Mtile * (Ktile + PADDING_A)) + (Ktile * (Ntile + PADDING_B))) *
+       (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+          sizeof(DTYPEAB)));
 
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
   cudaEventRecord(start, NULL);
-  int num_iters = 50;
+  int num_iters = 5;
   for (int i = 0; i < num_iters; ++i) {
     GEMM<<<grid, block,
-           (((Mtile * (Ktile + PADDING_AB)) + (Ktile * (Ntile + PADDING_AB))) *
-            STAGES * sizeof(DTYPEAB))>>>(d_a, d_b, d_c, d_d, m, n, k);
+           (((Mtile * (Ktile + PADDING_A)) + (Ktile * (Ntile + PADDING_B))) *
+            (STAGES == 1 ? 1 : (STAGES - 1) * 2) * sizeof(DTYPEAB))>>>(
+        d_a, d_b, d_c, d_d, m, n, k);
   }
   cudaEventRecord(stop, NULL);
 
