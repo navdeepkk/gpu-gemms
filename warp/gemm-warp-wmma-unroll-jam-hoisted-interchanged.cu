@@ -14,6 +14,7 @@
 #include <device_launch_parameters.h>
 #include <mma.h>
 
+#include <cmath>
 #include <cuda/pipeline>
 
 #include "common.h"
@@ -26,8 +27,8 @@
 #define WM 16
 #define WN 16
 #define WK 16
-#define Mtile 128 // This will actually be the loop step of `i` loop.
-#define Ntile 128 // This will actually be the loop step of `j` loop.
+#define Mtile 128  // This will actually be the loop step of `i` loop.
+#define Ntile 128  // This will actually be the loop step of `j` loop.
 #define Ktile 32   // This will actually be the loop step of `k` loop.
 #define WarpMtile 64
 #define WarpNtile 64
@@ -40,7 +41,7 @@
 #define PADDING_B 8
 #define MBLOCK 32
 #define NBLOCK 32
-#define STAGES 3
+#define STAGES 2
 
 #define C_LAYOUT wmma::mem_row_major
 
@@ -68,7 +69,7 @@ __host__ void init_host_matrices(DTYPEAB *a, DTYPEAB *b, DTYPECD *c) {
       // <float> (RAND_MAX) * 10);
       a[i * K + j] = __float2half(static_cast<float>(
           static_cast<int>(static_cast<float>(rand()) /
-                           static_cast<float>(RAND_MAX) * 10) +
+                           static_cast<float>(RAND_MAX) * 100) +
           1));
       // a[i * K + j] = __float2half(1.0f);
     }
@@ -80,7 +81,7 @@ __host__ void init_host_matrices(DTYPEAB *a, DTYPEAB *b, DTYPECD *c) {
       // <float> (RAND_MAX) * 10);
       b[i * N + j] = __float2half(static_cast<float>(
           static_cast<int>(static_cast<float>(rand()) /
-                           static_cast<float>(RAND_MAX) * 10) +
+                           static_cast<float>(RAND_MAX) * 100) +
           1));
       // b[i * N + j] = __float2half(1.0f);
     }
@@ -148,8 +149,8 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   }
 
   // Reserve shared memory tiles for the operands.
-  extern __shared__ DTYPEAB s[];
-  DTYPEAB *asmem = s;
+  extern __shared__ int s[];
+  DTYPEAB *asmem = (DTYPEAB *)s;
   DTYPEAB *bsmem = &asmem[(STAGES == 1 ? 1 : ((STAGES - 1) * 2)) * Mtile *
                           (Ktile + PADDING_A)];
 
@@ -214,7 +215,29 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   wmma::fragment<wmma::accumulator, WM, WN, WK, DTYPECD>
       c_accum[WarpMtile / WM][WarpNtile / WN];
 
-  // Load the accumulator tile from global memory to the registers.
+  // Create the pipeline object and a vector type.
+  cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
+  const auto shape4 = cuda::aligned_size_t<alignof(int4)>(sizeof(int4));
+
+  // Load the accumulator tile from global memory to shared memory.
+  int4 *cgmemBase = (int4 *)c_tb_tile_offset;
+  int4 *csmemBase = (int4 *)s;
+#pragma unroll
+  for (int i = 0, e = Mtile * (Ntile / 4); i < e; i += numThreads) {
+    pipe.producer_acquire();
+    cuda::memcpy_async(
+        (csmemBase + (((i + linear_tid) / (Ntile / 4)) * (Ntile / 4)) +
+         ((i + linear_tid) % (Ntile / 4))),
+        (cgmemBase + (((i + linear_tid) / (Ntile / 4) * (N / 4)) +
+                      ((i + linear_tid) % (Ntile / 4)))),
+        shape4, pipe);
+    pipe.producer_commit();
+  }
+  cuda::pipeline_consumer_wait_prior<0>(pipe);
+  __syncthreads();
+
+  // Load the accumulator tile from shared memory to the registers.
+  c_warp_tile_base = (DTYPECD *)s;
 #pragma unroll
   for (int i_iter_warp_base = warpIdx.y * WarpMtile; i_iter_warp_base < Mtile;
        i_iter_warp_base += WarpMtile * numWarpsInM) {
@@ -222,22 +245,19 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
     for (int j_iter_warp_base = warpIdx.x * WarpNtile; j_iter_warp_base < Ntile;
          j_iter_warp_base += WarpNtile * numWarpsInN) {
       c_warp_tile_offset =
-          c_warp_tile_base + i_iter_warp_base * N + j_iter_warp_base;
+          c_warp_tile_base + i_iter_warp_base * Ntile + j_iter_warp_base;
 #pragma unroll
       for (int i = 0; i < WarpMtile; i += WM) {
 #pragma unroll
         for (int j = 0; j < WarpNtile; j += WN) {
           wmma::load_matrix_sync(c_accum[i / WM][j / WN],
-                                 c_warp_tile_offset + ((i * n) + j), n,
+                                 c_warp_tile_offset + ((i * Ntile) + j), Ntile,
                                  C_LAYOUT);
         }
       }
     }
   }
-
-  // Create the pipeline object and a vector type.
-  cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
-  const auto shape4 = cuda::aligned_size_t<alignof(int4)>(sizeof(int4));
+  __syncthreads();
 
   // Fetch the pipelined stages AOT.
 #pragma unroll
@@ -594,23 +614,24 @@ int main() {
   dim3 grid((n + Ntile - 1) / Ntile, (m + Mtile - 1) / Mtile, 1);
 
   // Prefer shared memory config.
-  check_cuda_error(cudaFuncSetCacheConfig(GEMM, cudaFuncCachePreferShared));
-  check_cuda_error(cudaFuncSetAttribute(
-      GEMM, cudaFuncAttributeMaxDynamicSharedMemorySize,
+  unsigned long smem_capacity = std::max(
       (((Mtile * (Ktile + PADDING_A)) + (Ktile * (Ntile + PADDING_B))) *
        (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
-          sizeof(DTYPEAB)));
+          sizeof(DTYPEAB),
+      Mtile * Ntile * sizeof(DTYPECD));
+  check_cuda_error(cudaFuncSetCacheConfig(GEMM, cudaFuncCachePreferShared));
+  check_cuda_error(cudaFuncSetAttribute(
+      GEMM, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_capacity));
+  cout << "Using " << std::ceil(smem_capacity / 1024)
+       << " KiB for shared memory\n";
 
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
   cudaEventRecord(start, NULL);
-  int num_iters = 5;
+  int num_iters = 100;
   for (int i = 0; i < num_iters; ++i) {
-    GEMM<<<grid, block,
-           (((Mtile * (Ktile + PADDING_A)) + (Ktile * (Ntile + PADDING_B))) *
-            (STAGES == 1 ? 1 : (STAGES - 1) * 2) * sizeof(DTYPEAB))>>>(
-        d_a, d_b, d_c, d_d, m, n, k);
+    GEMM<<<grid, block, smem_capacity>>>(d_a, d_b, d_c, d_d, m, n, k);
   }
   cudaEventRecord(stop, NULL);
 
