@@ -39,6 +39,7 @@
   (Mtile / WarpMtile) * (Ntile / WarpNtile) * WarpSize
 #define PADDING_A 8
 #define PADDING_B 8
+#define PADDING_C 4
 #define MBLOCK 32
 #define NBLOCK 32
 #define STAGES 2
@@ -226,7 +227,8 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   for (int i = 0, e = Mtile * (Ntile / 4); i < e; i += numThreads) {
     pipe.producer_acquire();
     cuda::memcpy_async(
-        (csmemBase + (((i + linear_tid) / (Ntile / 4)) * (Ntile / 4)) +
+        (csmemBase +
+         (((i + linear_tid) / (Ntile / 4)) * ((Ntile + PADDING_C) / 4)) +
          ((i + linear_tid) % (Ntile / 4))),
         (cgmemBase + (((i + linear_tid) / (Ntile / 4) * (N / 4)) +
                       ((i + linear_tid) % (Ntile / 4)))),
@@ -244,15 +246,17 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
 #pragma unroll
     for (int j_iter_warp_base = warpIdx.x * WarpNtile; j_iter_warp_base < Ntile;
          j_iter_warp_base += WarpNtile * numWarpsInN) {
-      c_warp_tile_offset =
-          c_warp_tile_base + i_iter_warp_base * Ntile + j_iter_warp_base;
+      c_warp_tile_offset = c_warp_tile_base +
+                           i_iter_warp_base * (Ntile + PADDING_C) +
+                           j_iter_warp_base;
 #pragma unroll
       for (int i = 0; i < WarpMtile; i += WM) {
 #pragma unroll
         for (int j = 0; j < WarpNtile; j += WN) {
-          wmma::load_matrix_sync(c_accum[i / WM][j / WN],
-                                 c_warp_tile_offset + ((i * Ntile) + j), Ntile,
-                                 C_LAYOUT);
+          wmma::load_matrix_sync(
+              c_accum[i / WM][j / WN],
+              c_warp_tile_offset + ((i * (Ntile + PADDING_C)) + j),
+              (Ntile + PADDING_C), C_LAYOUT);
         }
       }
     }
@@ -618,7 +622,7 @@ int main() {
       (((Mtile * (Ktile + PADDING_A)) + (Ktile * (Ntile + PADDING_B))) *
        (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
           sizeof(DTYPEAB),
-      Mtile * Ntile * sizeof(DTYPECD));
+      Mtile * (Ntile + PADDING_C) * sizeof(DTYPECD));
   check_cuda_error(cudaFuncSetCacheConfig(GEMM, cudaFuncCachePreferShared));
   check_cuda_error(cudaFuncSetAttribute(
       GEMM, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_capacity));
@@ -629,7 +633,7 @@ int main() {
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
   cudaEventRecord(start, NULL);
-  int num_iters = 100;
+  int num_iters = 50;
   for (int i = 0; i < num_iters; ++i) {
     GEMM<<<grid, block, smem_capacity>>>(d_a, d_b, d_c, d_d, m, n, k);
   }
