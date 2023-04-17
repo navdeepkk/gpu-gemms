@@ -122,7 +122,7 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   // Struct holding the geometrical coordinates of the warp.
   WarpIdx warpIdx;
 
-  int numThreads = NUM_THREADS_PER_BLOCK;
+  constexpr int numThreads = NUM_THREADS_PER_BLOCK;
   int numWarpsInM = 1, numWarpsInN = 1, numWarps = numThreads / WarpSize;
 
   // Number of warps in the `M` and `N` dimension, of the thread block. If there
@@ -259,40 +259,50 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
 
     a_thread_tile_base_copy = a_tb_tile_offset;
     b_thread_tile_base_copy = b_tb_tile_offset;
-    // Copy the operands from global to shared memory. Each thread copies
-    // the `chunktocopy` elements from global to shared memory. The thread
-    // Id's inside a thread block need to be linearized. Each thread
-    // copies it's contiguous chunk form global memory to the shared
-    // memory.
-    int4 *agmemBase = (int4 *)a_thread_tile_base_copy;
+
+    // We try to do the address calculation in the global memory with as
+    // less address computation as possible. Hence, we compute the base
+    // for each threads copy here and then just add some minimal offset
+    // later.
+    int a_global_row = linear_tid / (Ktile / 8);
+    int a_global_col = linear_tid % (Ktile / 8);
+    constexpr int a_row_span_in_thread_block = numThreads / (Ktile / 8);
+    constexpr int a_offset_per_thread_gmem =
+        a_row_span_in_thread_block * (K / 8);
+    int4 *agmemBase =
+        (int4 *)a_thread_tile_base_copy + a_global_row * (K / 8) + a_global_col;
     int4 *asmemBase = (int4 *)&asmem[((stage / Ktile) %
-                                      (STAGES == 1 ? 1 : ((STAGES - 1) * 2))) *
+                                      (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
                                      (Mtile * (Ktile + PADDING_A))];
-    int4 *bgmemBase = (int4 *)b_thread_tile_base_copy;
+    int b_global_row = linear_tid / (Ntile / 8);
+    int b_global_col = linear_tid % (Ntile / 8);
+    constexpr int b_row_span_in_thread_block = numThreads / (Ntile / 8);
+    constexpr int b_offset_per_thread_gmem =
+        b_row_span_in_thread_block * (N / 8);
+    int4 *bgmemBase =
+        (int4 *)b_thread_tile_base_copy + b_global_row * (N / 8) + b_global_col;
     int4 *bsmemBase = (int4 *)&bsmem[((stage / Ktile) %
-                                      (STAGES == 1 ? 1 : ((STAGES - 1) * 2))) *
+                                      (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
                                      (Ktile * (Ntile + PADDING_B))];
 
     pipe.producer_acquire();
 #pragma unroll
-    for (int i = 0, e = Mtile * (Ktile / 8); i < e; i += numThreads) {
-      cuda::memcpy_async(
-          (asmemBase +
-           (((i + linear_tid) / (Ktile / 8)) * ((Ktile + PADDING_A) / 8)) +
-           ((i + linear_tid) % (Ktile / 8))),
-          (agmemBase + (((i + linear_tid) / (Ktile / 8) * (K / 8)) +
-                        ((i + linear_tid) % (Ktile / 8)))),
-          shape4, pipe);
+    for (int i = 0, e = (Mtile * (Ktile / 8)) / numThreads; i < e; ++i) {
+      cuda::memcpy_async((asmemBase +
+                          ((((i * numThreads) + linear_tid) / (Ktile / 8)) *
+                           ((Ktile + PADDING_A) / 8)) +
+                          (((i * numThreads) + linear_tid) % (Ktile / 8))),
+                         (agmemBase + (i * a_offset_per_thread_gmem)), shape4,
+                         pipe);
     }
 #pragma unroll
-    for (int i = 0, e = Ktile * (Ntile / 8); i < e; i += numThreads) {
-      cuda::memcpy_async(
-          (bsmemBase +
-           (((i + linear_tid) / (Ntile / 8)) * ((Ntile + PADDING_B) / 8)) +
-           ((i + linear_tid) % (Ntile / 8))),
-          (bgmemBase + (((i + linear_tid) / (Ntile / 8) * (N / 8)) +
-                        ((i + linear_tid) % (Ntile / 8)))),
-          shape4, pipe);
+    for (int i = 0, e = (Ktile * (Ntile / 8)) / numThreads; i < e; ++i) {
+      cuda::memcpy_async((bsmemBase +
+                          ((((i * numThreads) + linear_tid) / (Ntile / 8)) *
+                           ((Ntile + PADDING_B) / 8)) +
+                          (((i * numThreads) + linear_tid) % (Ntile / 8))),
+                         (bgmemBase + (i * b_offset_per_thread_gmem)), shape4,
+                         pipe);
     }
     pipe.producer_commit();
   }
@@ -346,17 +356,29 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
 
           a_thread_tile_base_copy = a_tb_tile_offset;
           b_thread_tile_base_copy = b_tb_tile_offset;
-          // Copy the operands from global to shared memory. Each thread copies
-          // the `chunktocopy` elements from global to shared memory. The thread
-          // Id's inside a thread block need to be linearized. Each thread
-          // copies it's contiguous chunk form global memory to the shared
-          // memory.
-          int4 *agmemBase = (int4 *)a_thread_tile_base_copy;
+
+          // We try to do the address calculation in the global memory with as
+          // less address computation as possible. Hence, we compute the base
+          // for each threads copy here and then just add some minimal offset
+          // later.
+          int a_global_row = linear_tid / (Ktile / 8);
+          int a_global_col = linear_tid % (Ktile / 8);
+          constexpr int a_row_span_in_thread_block = numThreads / (Ktile / 8);
+          constexpr int a_offset_per_thread_gmem =
+              a_row_span_in_thread_block * (K / 8);
+          int4 *agmemBase = (int4 *)a_thread_tile_base_copy +
+                            a_global_row * (K / 8) + a_global_col;
           int4 *asmemBase =
               (int4 *)&asmem[((stage / Ktile) %
                               (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
                              (Mtile * (Ktile + PADDING_A))];
-          int4 *bgmemBase = (int4 *)b_thread_tile_base_copy;
+          int b_global_row = linear_tid / (Ntile / 8);
+          int b_global_col = linear_tid % (Ntile / 8);
+          constexpr int b_row_span_in_thread_block = numThreads / (Ntile / 8);
+          constexpr int b_offset_per_thread_gmem =
+              b_row_span_in_thread_block * (N / 8);
+          int4 *bgmemBase = (int4 *)b_thread_tile_base_copy +
+                            b_global_row * (N / 8) + b_global_col;
           int4 *bsmemBase =
               (int4 *)&bsmem[((stage / Ktile) %
                               (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
@@ -366,26 +388,22 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
           // loop.
           pipe.producer_acquire();
 #pragma unroll
-          for (int i = 0, e = Mtile * (Ktile / 8); i < e; i += numThreads) {
+          for (int i = 0, e = (Mtile * (Ktile / 8)) / numThreads; i < e; ++i) {
             cuda::memcpy_async(
                 (asmemBase +
-                 (((i + linear_tid) / (Ktile / 8)) *
+                 ((((i * numThreads) + linear_tid) / (Ktile / 8)) *
                   ((Ktile + PADDING_A) / 8)) +
-                 ((i + linear_tid) % (Ktile / 8))),
-                (agmemBase + (((i + linear_tid) / (Ktile / 8) * (K / 8)) +
-                              ((i + linear_tid) % (Ktile / 8)))),
-                shape4, pipe);
+                 (((i * numThreads) + linear_tid) % (Ktile / 8))),
+                (agmemBase + (i * a_offset_per_thread_gmem)), shape4, pipe);
           }
 #pragma unroll
-          for (int i = 0, e = Ktile * (Ntile / 8); i < e; i += numThreads) {
+          for (int i = 0, e = (Ktile * (Ntile / 8)) / numThreads; i < e; ++i) {
             cuda::memcpy_async(
                 (bsmemBase +
-                 (((i + linear_tid) / (Ntile / 8)) *
+                 ((((i * numThreads) + linear_tid) / (Ntile / 8)) *
                   ((Ntile + PADDING_B) / 8)) +
-                 ((i + linear_tid) % (Ntile / 8))),
-                (bgmemBase + (((i + linear_tid) / (Ntile / 8) * (N / 8)) +
-                              ((i + linear_tid) % (Ntile / 8)))),
-                shape4, pipe);
+                 (((i * numThreads) + linear_tid) % (Ntile / 8))),
+                (bgmemBase + (i * b_offset_per_thread_gmem)), shape4, pipe);
           }
           pipe.producer_commit();
         }
@@ -620,7 +638,7 @@ int main() {
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
   cudaEventRecord(start, NULL);
-  int num_iters = 50;
+  int num_iters = 5;
   for (int i = 0; i < num_iters; ++i) {
     GEMM<<<grid, block, smem_capacity>>>(d_a, d_b, d_c, d_d, m, n, k);
   }
