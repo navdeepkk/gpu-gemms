@@ -48,13 +48,6 @@
 
 using namespace nvcuda;
 
-// Seeing here that the thread block tile is going to calculate 128x128 output
-// and one warp tile is to calculate 64x64 we only need 4 warps. i.e., we need
-// to have 32 x 4 = 128 threads. A thread block of the kind 32 x 4 etc. is not
-// possible. We need to have the thread block dimensions as multiples of 32
-// which 4 clearly isn't. so we need to launch 128 threads in one dimension only
-// a whole lot of refactoring is needed.
-
 using namespace std;
 
 typedef struct {
@@ -66,25 +59,19 @@ typedef struct {
 __host__ void init_host_matrices(DTYPEAB *a, DTYPEAB *b, DTYPECD *c) {
   for (int i = 0; i < M; i++) {
     for (int j = 0; j < K; j++) {
-      // a[i * K + j] = __float2half(static_cast <float> (rand()) / static_cast
-      // <float> (RAND_MAX) * 10);
       a[i * K + j] = __float2half(static_cast<float>(
           static_cast<int>(static_cast<float>(rand()) /
                            static_cast<float>(RAND_MAX) * 100) +
           1));
-      // a[i * K + j] = __float2half(1.0f);
     }
   }
 
   for (int i = 0; i < K; i++) {
     for (int j = 0; j < N; j++) {
-      // b[i * N + j] = __float2half(static_cast <float> (rand()) / static_cast
-      // <float> (RAND_MAX) * 10);
       b[i * N + j] = __float2half(static_cast<float>(
           static_cast<int>(static_cast<float>(rand()) /
                            static_cast<float>(RAND_MAX) * 100) +
           1));
-      // b[i * N + j] = __float2half(1.0f);
     }
   }
 
