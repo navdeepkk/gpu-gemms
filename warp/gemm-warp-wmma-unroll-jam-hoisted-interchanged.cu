@@ -18,31 +18,18 @@
 #include <cuda/pipeline>
 
 #include "common.h"
+#include "include/gemm_params.h"
 
 #define DTYPECD float
 #define DTYPEAB __half
 #define M 1024
 #define N 3072
 #define K 768
-#define WM 16
-#define WN 16
-#define WK 16
-#define Mtile 128  // This will actually be the loop step of `i` loop.
-#define Ntile 128  // This will actually be the loop step of `j` loop.
-#define Ktile 32   // This will actually be the loop step of `k` loop.
-#define WarpMtile 64
-#define WarpNtile 64
-#define WarpKtile \
-  16  // 16 because the size supported by the wmma api is 16x16x16.
 #define WarpSize 32
 #define NUM_THREADS_PER_BLOCK \
   (Mtile / WarpMtile) * (Ntile / WarpNtile) * WarpSize
-#define PADDING_A 8
-#define PADDING_B 8
-#define PADDING_C 4
 #define MBLOCK 32
 #define NBLOCK 32
-#define STAGES 2
 
 #define C_LAYOUT wmma::mem_row_major
 
