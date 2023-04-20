@@ -123,11 +123,12 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
     numWarpsInM = numWarps / numWarpsInN;
   }
 
+  constexpr int smem_stage_offset = (STAGES == 1 ? 1 : ((STAGES - 1) * 2));
+
   // Reserve shared memory tiles for the operands.
   extern __shared__ int s[];
   DTYPEAB *asmem = (DTYPEAB *)s;
-  DTYPEAB *bsmem = &asmem[(STAGES == 1 ? 1 : ((STAGES - 1) * 2)) * Mtile *
-                          (Ktile + PADDING_A)];
+  DTYPEAB *bsmem = &asmem[smem_stage_offset * Mtile * (Ktile + PADDING_A)];
 
   // Linear thread id in the thread block.
   int linear_tid = (threadIdx.z * blockDim.x * blockDim.y) +
@@ -178,6 +179,29 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   DTYPECD *d_warp_tile_offset;
   DTYPEAB *a_warp_tile_offset_compute;
   DTYPEAB *b_warp_tile_offset_compute;
+
+  // We try to do the address calculation in the global memory with as
+  // less address computation as possible. Hence, we compute the base
+  // for each threads copy here and then just add some minimal offset
+  // later.
+  int a_global_row = linear_tid / (Ktile / 8);
+  int a_global_col = linear_tid % (Ktile / 8);
+  constexpr int a_row_span_in_thread_block = numThreads / (Ktile / 8);
+  constexpr int a_offset_per_thread_gmem = a_row_span_in_thread_block * (K / 8);
+  int a_smem_row = a_global_row;
+  int a_smem_col = a_global_col;
+  constexpr int a_row_span_in_smem = a_row_span_in_thread_block;
+  constexpr int a_offset_per_thread_smem =
+      a_row_span_in_smem * ((Ktile + PADDING_A) / 8);
+  int b_global_row = linear_tid / (Ntile / 8);
+  int b_global_col = linear_tid % (Ntile / 8);
+  constexpr int b_row_span_in_thread_block = numThreads / (Ntile / 8);
+  constexpr int b_offset_per_thread_gmem = b_row_span_in_thread_block * (N / 8);
+  int b_smem_row = b_global_row;
+  int b_smem_col = b_global_col;
+  constexpr int b_row_span_in_smem = b_row_span_in_thread_block;
+  constexpr int b_offset_per_thread_smem =
+      b_row_span_in_smem * ((Ntile + PADDING_B) / 8);
 
   // warp_tile_base for compute is equal to the base address in shared memory.
   c_warp_tile_base = c_tb_tile_offset;
@@ -246,41 +270,14 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
 
     a_thread_tile_base_copy = a_tb_tile_offset;
     b_thread_tile_base_copy = b_tb_tile_offset;
-
-    // We try to do the address calculation in the global memory with as
-    // less address computation as possible. Hence, we compute the base
-    // for each threads copy here and then just add some minimal offset
-    // later.
-    int a_global_row = linear_tid / (Ktile / 8);
-    int a_global_col = linear_tid % (Ktile / 8);
-    constexpr int a_row_span_in_thread_block = numThreads / (Ktile / 8);
-    constexpr int a_offset_per_thread_gmem =
-        a_row_span_in_thread_block * (K / 8);
     int4 *agmemBase =
         (int4 *)a_thread_tile_base_copy + a_global_row * (K / 8) + a_global_col;
-    int a_smem_row = a_global_row;
-    int a_smem_col = a_global_col;
-    constexpr int a_row_span_in_smem = a_row_span_in_thread_block;
-    constexpr int a_offset_per_thread_smem =
-        a_row_span_in_smem * ((Ktile + PADDING_A) / 8);
-    int4 *asmemBase = (int4 *)&asmem[((stage / Ktile) %
-                                      (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+    int4 *asmemBase = (int4 *)&asmem[((stage / Ktile) % smem_stage_offset) *
                                      (Mtile * (Ktile + PADDING_A))];
     asmemBase = asmemBase + a_smem_row * ((Ktile + PADDING_A) / 8) + a_smem_col;
-    int b_global_row = linear_tid / (Ntile / 8);
-    int b_global_col = linear_tid % (Ntile / 8);
-    constexpr int b_row_span_in_thread_block = numThreads / (Ntile / 8);
-    constexpr int b_offset_per_thread_gmem =
-        b_row_span_in_thread_block * (N / 8);
     int4 *bgmemBase =
         (int4 *)b_thread_tile_base_copy + b_global_row * (N / 8) + b_global_col;
-    int b_smem_row = b_global_row;
-    int b_smem_col = b_global_col;
-    constexpr int b_row_span_in_smem = b_row_span_in_thread_block;
-    constexpr int b_offset_per_thread_smem =
-        b_row_span_in_smem * ((Ntile + PADDING_B) / 8);
-    int4 *bsmemBase = (int4 *)&bsmem[((stage / Ktile) %
-                                      (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+    int4 *bsmemBase = (int4 *)&bsmem[((stage / Ktile) % smem_stage_offset) *
                                      (Ktile * (Ntile + PADDING_B))];
     bsmemBase = bsmemBase + b_smem_row * ((Ntile + PADDING_B) / 8) + b_smem_col;
 
@@ -354,39 +351,17 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
           // less address computation as possible. Hence, we compute the base
           // for each threads copy here and then just add some minimal offset
           // later.
-          int a_global_row = linear_tid / (Ktile / 8);
-          int a_global_col = linear_tid % (Ktile / 8);
-          constexpr int a_row_span_in_thread_block = numThreads / (Ktile / 8);
-          constexpr int a_offset_per_thread_gmem =
-              a_row_span_in_thread_block * (K / 8);
           int4 *agmemBase = (int4 *)a_thread_tile_base_copy +
                             a_global_row * (K / 8) + a_global_col;
-          int a_smem_row = a_global_row;
-          int a_smem_col = a_global_col;
-          constexpr int a_row_span_in_smem = a_row_span_in_thread_block;
-          constexpr int a_offset_per_thread_smem =
-              a_row_span_in_smem * ((Ktile + PADDING_A) / 8);
           int4 *asmemBase =
-              (int4 *)&asmem[((stage / Ktile) %
-                              (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+              (int4 *)&asmem[((stage / Ktile) % smem_stage_offset) *
                              (Mtile * (Ktile + PADDING_A))];
           asmemBase =
               asmemBase + a_smem_row * ((Ktile + PADDING_A) / 8) + a_smem_col;
-          int b_global_row = linear_tid / (Ntile / 8);
-          int b_global_col = linear_tid % (Ntile / 8);
-          constexpr int b_row_span_in_thread_block = numThreads / (Ntile / 8);
-          constexpr int b_offset_per_thread_gmem =
-              b_row_span_in_thread_block * (N / 8);
           int4 *bgmemBase = (int4 *)b_thread_tile_base_copy +
                             b_global_row * (N / 8) + b_global_col;
-          int b_smem_row = b_global_row;
-          int b_smem_col = b_global_col;
-          constexpr int b_row_span_in_smem = b_row_span_in_thread_block;
-          constexpr int b_offset_per_thread_smem =
-              b_row_span_in_smem * ((Ntile + PADDING_B) / 8);
           int4 *bsmemBase =
-              (int4 *)&bsmem[((stage / Ktile) %
-                              (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+              (int4 *)&bsmem[((stage / Ktile) % smem_stage_offset) *
                              (Ktile * (Ntile + PADDING_B))];
           bsmemBase =
               bsmemBase + b_smem_row * ((Ntile + PADDING_B) / 8) + b_smem_col;
@@ -417,10 +392,10 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
         // warp_tile_base for compute is equal to the base address in shared
         // memory.
         a_warp_tile_base = &asmem[(((kk - ((STAGES - 1) * Ktile)) / Ktile) %
-                                   (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+                                   smem_stage_offset) *
                                   (Mtile * (Ktile + PADDING_A))];
         b_warp_tile_base = &bsmem[(((kk - ((STAGES - 1) * Ktile)) / Ktile) %
-                                   (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
+                                   smem_stage_offset) *
                                   (Ktile * (Ntile + PADDING_B))];
 
 #pragma unroll
@@ -477,12 +452,10 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
       for (int kk = k - ((STAGES - 1) * Ktile); kk < k; kk += Ktile) {
         // warp_tile_base for compute is equal to the base address in shared
         // memory.
-        a_warp_tile_base =
-            &asmem[((kk / Ktile) % (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
-                   (Mtile * (Ktile + PADDING_A))];
-        b_warp_tile_base =
-            &bsmem[((kk / Ktile) % (STAGES == 1 ? 1 : (STAGES - 1) * 2)) *
-                   (Ktile * (Ntile + PADDING_B))];
+        a_warp_tile_base = &asmem[((kk / Ktile) % smem_stage_offset) *
+                                  (Mtile * (Ktile + PADDING_A))];
+        b_warp_tile_base = &bsmem[((kk / Ktile) % smem_stage_offset) *
+                                  (Ktile * (Ntile + PADDING_B))];
 
 #pragma unroll
         for (int kkk = 0; kkk < Ktile; kkk += WarpKtile) {
