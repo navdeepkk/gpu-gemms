@@ -259,7 +259,6 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
       }
     }
   }
-  __syncthreads();
 
   // Fetch the pipelined stages AOT.
 #pragma unroll
@@ -333,12 +332,12 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
       // K dimension is sequential so this is not mapped to the gpu compute
       // hierarchy. Inter tile K-loop. Thread Block K-loop.
 #pragma unroll
-      for (int kk = (STAGES - 1) * Ktile, stage = (STAGES - 1) * Ktile; kk < k;
-           kk += Ktile) {
+      for (int kk = (STAGES - 1) * Ktile; kk < k; kk += Ktile * (STAGES - 1)) {
         // Fetch ahead for `STAGES - 1` stages.
 #pragma unroll
-        for (; stage < kk + (STAGES == 1 ? 1 : ((STAGES - 1)) * Ktile) &&
-               stage < k;
+        for (int stage = kk;
+             stage < kk + (STAGES == 1 ? 1 : ((STAGES - 1)) * Ktile) &&
+             stage < k;
              stage += Ktile) {
           // Base address in global tile of A & B operand thread block tile.
           a_tb_tile_offset = a_tb_tile_base + i_iter_tile_base * k + stage;
@@ -399,48 +398,55 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
                                   (Ktile * (Ntile + PADDING_B))];
 
 #pragma unroll
-        for (int kkk = 0; kkk < Ktile; kkk += WarpKtile) {
-          if (kkk < k) {
-            // Warp tile offset of asmem will only be dependent on the
-            // warpIdx.y i.e., the row of the warp which is computing this
-            // particular part. This points to the starting address of this
-            // warp for the `a` operand.
-            a_warp_tile_offset_compute =
-                a_warp_tile_base + (i_iter_warp_base * (Ktile + PADDING_A)) +
-                kkk;
+        for (int stage = kk - ((STAGES == 1 ? 0 : (STAGES - 1)) * Ktile);
+             stage < kk; stage += Ktile) {
+          // warp_tile_base for compute is equal to the base address in shared
+          // memory.
+          a_warp_tile_base = &asmem[((stage / Ktile) % smem_stage_offset) *
+                                    (Mtile * (Ktile + PADDING_A))];
+          b_warp_tile_base = &bsmem[((stage / Ktile) % smem_stage_offset) *
+                                    (Ktile * (Ntile + PADDING_B))];
+          for (int kkk = 0; kkk < Ktile; kkk += WarpKtile) {
+            if (kkk < k) {
+              // Warp tile offset of asmem will only be dependent on the
+              // warpIdx.y i.e., the row of the warp which is computing this
+              // particular part. This points to the starting address of this
+              // warp for the `a` operand.
+              a_warp_tile_offset_compute =
+                  a_warp_tile_base + (i_iter_warp_base * (Ktile + PADDING_A)) +
+                  kkk;
 
-            // Warp tile offset of bsmem will only be dependent on the
-            // warpIdx.x i.e., the col of the warp which is computing this
-            // particular part. This points to the starting address of this
-            // warp for the `b` operand.
-            b_warp_tile_offset_compute = b_warp_tile_base +
-                                         (kkk * (Ntile + PADDING_B)) +
-                                         (j_iter_warp_base);
+              // Warp tile offset of bsmem will only be dependent on the
+              // warpIdx.x i.e., the col of the warp which is computing this
+              // particular part. This points to the starting address of this
+              // warp for the `b` operand.
+              b_warp_tile_offset_compute = b_warp_tile_base +
+                                           (kkk * (Ntile + PADDING_B)) +
+                                           (j_iter_warp_base);
 
-            // This micro-kernel below re-uses the value of the A registers.
-            // The compiler should have done this optimization but was not able
-            // so we had to do this manually.
-#pragma unroll
-            for (int i = 0; i < WarpMtile; i += WM) {
-              wmma::load_matrix_sync(
-                  a_frag[i / WM],
-                  a_warp_tile_offset_compute + (i * (Ktile + PADDING_A)),
-                  (Ktile + PADDING_A));
-            }
-#pragma unroll
-            for (int j = 0; j < WarpNtile; j += WN) {
-              wmma::load_matrix_sync(b_frag, b_warp_tile_offset_compute + j,
-                                     (Ntile + PADDING_B));
+              // This micro-kernel below re-uses the value of the A registers.
+              // The compiler should have done this optimization but was not
+              // able so we had to do this manually.
 #pragma unroll
               for (int i = 0; i < WarpMtile; i += WM) {
-                wmma::mma_sync(c_accum[i / WM][j / WN], a_frag[i / WM], b_frag,
-                               c_accum[i / WM][j / WN]);
+                wmma::load_matrix_sync(
+                    a_frag[i / WM],
+                    a_warp_tile_offset_compute + (i * (Ktile + PADDING_A)),
+                    (Ktile + PADDING_A));
+              }
+#pragma unroll
+              for (int j = 0; j < WarpNtile; j += WN) {
+                wmma::load_matrix_sync(b_frag, b_warp_tile_offset_compute + j,
+                                       (Ntile + PADDING_B));
+#pragma unroll
+                for (int i = 0; i < WarpMtile; i += WM) {
+                  wmma::mma_sync(c_accum[i / WM][j / WN], a_frag[i / WM],
+                                 b_frag, c_accum[i / WM][j / WN]);
+                }
               }
             }
           }
         }
-        pipe.consumer_release();
-        __syncthreads();
       }
 
       // Wait for all data copy stages to complete.
