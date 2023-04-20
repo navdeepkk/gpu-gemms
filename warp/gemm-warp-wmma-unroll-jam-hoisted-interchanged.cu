@@ -207,10 +207,10 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
   c_warp_tile_base = c_tb_tile_offset;
   d_warp_tile_base = d_tb_tile_offset;
 
-  // Allocate accmulator fragments for the C warp tiles. The allocation happens
-  // at a per warp level. Each warp in the thread block will have this type of
-  // accumulator tile. This accumulator tile is to be kept alive even accross
-  // different iterations of the outermost k-loop.
+  // Allocate accumulator fragments for the C warp tiles. The allocation
+  // happens at a per warp level. Each warp in the thread block will have this
+  // type of accumulator tile. This accumulator tile is to be kept alive even
+  // across different iterations of the outermost k-loop.
   wmma::fragment<wmma::accumulator, WM, WN, WK, DTYPECD>
       c_accum[WarpMtile / WM][WarpNtile / WN];
 
@@ -272,13 +272,13 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
     b_thread_tile_base_copy = b_tb_tile_offset;
     int4 *agmemBase =
         (int4 *)a_thread_tile_base_copy + a_global_row * (K / 8) + a_global_col;
-    int4 *asmemBase = (int4 *)&asmem[((stage / Ktile) % smem_stage_offset) *
-                                     (Mtile * (Ktile + PADDING_A))];
+    int4 *asmemBase =
+        (int4 *)&asmem[(stage / Ktile) * (Mtile * (Ktile + PADDING_A))];
     asmemBase = asmemBase + a_smem_row * ((Ktile + PADDING_A) / 8) + a_smem_col;
     int4 *bgmemBase =
         (int4 *)b_thread_tile_base_copy + b_global_row * (N / 8) + b_global_col;
-    int4 *bsmemBase = (int4 *)&bsmem[((stage / Ktile) % smem_stage_offset) *
-                                     (Ktile * (Ntile + PADDING_B))];
+    int4 *bsmemBase =
+        (int4 *)&bsmem[(stage / Ktile) * (Ktile * (Ntile + PADDING_B))];
     bsmemBase = bsmemBase + b_smem_row * ((Ntile + PADDING_B) / 8) + b_smem_col;
 
     pipe.producer_acquire();
@@ -312,18 +312,18 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
           d_warp_tile_base + i_iter_warp_base * N + j_iter_warp_base;
 
       // Inter-warp-tile loop. Goes inside a thread block tile in steps of
-      // warpKtile. Tf WarpKtile is equal to Ktile then K dimesnion is not
+      // warpKtile. Tf WarpKtile is equal to Ktile then K dimension is not
       // really tiled for the warp. Tiling for warp may result in reduced
       // register pressure and hence may reduce spills.
-      // TODO: Try to see performance benifits of different tile sized in the
-      // k-dime nsion for warps.
+      // TODO: Try to see performance benefits of different tile sized in the
+      // k-dimension for warps.
       // TODO: This needs to be fixed. If the WarpKtile is not 16 then the
       // number of 16x16 operand tiles that are moved need to be changed. I.e.,
       // a_frag and b_frag now need to be 2-d arrays and one more loop inside
       // this loop needs to be present which calculates the WarpKtile in chunks
       // of 16 each.
 
-      // These fragments contain the register operands for the a and b matrix.
+      // These fragments contain the register operands for the A and B matrix.
       // These contain only the operands for calculating one k-dimension.
       wmma::fragment<wmma::matrix_a, WM, WN, WK, DTYPEAB, wmma::row_major>
           a_frag[WarpMtile / WM];
@@ -401,25 +401,25 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
 #pragma unroll
         for (int kkk = 0; kkk < Ktile; kkk += WarpKtile) {
           if (kkk < k) {
-            // Warp tile offset of asmem will only be dependent on the warpIdx.y
-            // i.e., the row of the warp which is computing this particular
-            // part. This points to the starting address of this warp for the
-            // `a` operand.
+            // Warp tile offset of asmem will only be dependent on the
+            // warpIdx.y i.e., the row of the warp which is computing this
+            // particular part. This points to the starting address of this
+            // warp for the `a` operand.
             a_warp_tile_offset_compute =
                 a_warp_tile_base + (i_iter_warp_base * (Ktile + PADDING_A)) +
                 kkk;
 
-            // Warp tile offset of bsmem will only be dependent on the warpIdx.x
-            // i.e., the col of the warp which is computing this particular
-            // part. This points to the starting address of this warp for the
-            // `b` operand.
+            // Warp tile offset of bsmem will only be dependent on the
+            // warpIdx.x i.e., the col of the warp which is computing this
+            // particular part. This points to the starting address of this
+            // warp for the `b` operand.
             b_warp_tile_offset_compute = b_warp_tile_base +
                                          (kkk * (Ntile + PADDING_B)) +
                                          (j_iter_warp_base);
 
-            // This micro-kernel below re-uses the value of the a registers. The
-            // compiler should have done this optimization but was not able so
-            // we had to do this manually.
+            // This micro-kernel below re-uses the value of the A registers.
+            // The compiler should have done this optimization but was not able
+            // so we had to do this manually.
 #pragma unroll
             for (int i = 0; i < WarpMtile; i += WM) {
               wmma::load_matrix_sync(
@@ -460,25 +460,25 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
 #pragma unroll
         for (int kkk = 0; kkk < Ktile; kkk += WarpKtile) {
           if (kkk < k) {
-            // Warp tile offset of asmem will only be dependent on the warpIdx.y
-            // i.e., the row of the warp which is computing this particular
-            // part. This points to the starting address of this warp for the
-            // `a` operand.
+            // Warp tile offset of asmem will only be dependent on the
+            // warpIdx.y i.e., the row of the warp which is computing this
+            // particular part. This points to the starting address of this
+            // warp for the `a` operand.
             a_warp_tile_offset_compute =
                 a_warp_tile_base + (i_iter_warp_base * (Ktile + PADDING_A)) +
                 kkk;
 
-            // Warp tile offset of bsmem will only be dependent on the warpIdx.x
-            // i.e., the col of the warp which is computing this particular
-            // part. This points to the starting address of this warp for the
-            // `b` operand.
+            // Warp tile offset of bsmem will only be dependent on the
+            // warpIdx.x i.e., the col of the warp which is computing this
+            // particular part. This points to the starting address of this
+            // warp for the `b` operand.
             b_warp_tile_offset_compute = b_warp_tile_base +
                                          (kkk * (Ntile + PADDING_B)) +
                                          (j_iter_warp_base);
 
-            // This micro-kernel below re-uses the value of the a registers. The
-            // compiler should have done this optimization but was not able so
-            // we had to do this manually.
+            // This micro-kernel below re-uses the value of the A registers.
+            // The compiler should have done this optimization but was not able
+            // so we had to do this manually.
 #pragma unroll
             for (int i = 0; i < WarpMtile; i += WM) {
               wmma::load_matrix_sync(
@@ -503,7 +503,7 @@ __global__ void GEMM(DTYPEAB *a, DTYPEAB *b, DTYPECD *c, DTYPECD *d, int m,
     }
   }
 
-// K-dimension processing of one warp is finished. We can copy the accum
+// K-dimension processing of one warp is finished. We can copy the accumulator
 // fragment corresponding to this warp to the result array `d` in global
 // memory.
 // TODO: currently assuming that one warp tile is only mapped to one warp,
